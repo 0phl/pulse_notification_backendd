@@ -1,5 +1,10 @@
 const express = require('express');
-const { sendNotificationToUser, sendNotificationToCommunity } = require('../services/notifications');
+const services = require('../services');
+const {
+  sendNotificationToUser,
+  sendNotificationToCommunity,
+  cleanupReadNotifications
+} = services.notifications;
 
 const router = express.Router();
 
@@ -7,18 +12,18 @@ const router = express.Router();
 router.post('/send', async (req, res) => {
   try {
     const { userId, title, body, data } = req.body;
-    
+
     // Validate required fields
     if (!userId || !title || !body) {
-      return res.status(400).json({ 
-        success: false, 
-        error: 'Missing required fields: userId, title, body' 
+      return res.status(400).json({
+        success: false,
+        error: 'Missing required fields: userId, title, body'
       });
     }
-    
+
     // Send notification
     const result = await sendNotificationToUser(userId, title, body, data || {});
-    
+
     if (result.success) {
       return res.status(200).json(result);
     } else {
@@ -26,9 +31,9 @@ router.post('/send', async (req, res) => {
     }
   } catch (error) {
     console.error('Error sending notification:', error);
-    return res.status(500).json({ 
-      success: false, 
-      error: error.message 
+    return res.status(500).json({
+      success: false,
+      error: error.message
     });
   }
 });
@@ -37,24 +42,24 @@ router.post('/send', async (req, res) => {
 router.post('/send-community', async (req, res) => {
   try {
     const { communityId, title, body, data, excludeUserId } = req.body;
-    
+
     // Validate required fields
     if (!communityId || !title || !body) {
-      return res.status(400).json({ 
-        success: false, 
-        error: 'Missing required fields: communityId, title, body' 
+      return res.status(400).json({
+        success: false,
+        error: 'Missing required fields: communityId, title, body'
       });
     }
-    
+
     // Send notification
     const result = await sendNotificationToCommunity(
-      communityId, 
-      title, 
-      body, 
-      data || {}, 
+      communityId,
+      title,
+      body,
+      data || {},
       excludeUserId
     );
-    
+
     if (result.success) {
       return res.status(200).json(result);
     } else {
@@ -62,9 +67,9 @@ router.post('/send-community', async (req, res) => {
     }
   } catch (error) {
     console.error('Error sending community notification:', error);
-    return res.status(500).json({ 
-      success: false, 
-      error: error.message 
+    return res.status(500).json({
+      success: false,
+      error: error.message
     });
   }
 });
@@ -73,15 +78,15 @@ router.post('/send-community', async (req, res) => {
 router.post('/test', async (req, res) => {
   try {
     const { userId } = req.body;
-    
+
     // Validate required fields
     if (!userId) {
-      return res.status(400).json({ 
-        success: false, 
-        error: 'Missing required field: userId' 
+      return res.status(400).json({
+        success: false,
+        error: 'Missing required field: userId'
       });
     }
-    
+
     // Send test notification
     const result = await sendNotificationToUser(
       userId,
@@ -89,7 +94,7 @@ router.post('/test', async (req, res) => {
       'This is a test notification from the PULSE notification server',
       { type: 'test', timestamp: new Date().toISOString() }
     );
-    
+
     if (result.success) {
       return res.status(200).json(result);
     } else {
@@ -97,9 +102,29 @@ router.post('/test', async (req, res) => {
     }
   } catch (error) {
     console.error('Error sending test notification:', error);
-    return res.status(500).json({ 
-      success: false, 
-      error: error.message 
+    return res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+// Cleanup read notifications to save storage
+router.post('/cleanup', async (_, res) => {
+  try {
+    // Run the cleanup
+    const result = await cleanupReadNotifications();
+
+    return res.status(200).json({
+      success: true,
+      message: `Cleaned up ${result.count} read notifications`,
+      ...result
+    });
+  } catch (error) {
+    console.error('Error cleaning up read notifications:', error);
+    return res.status(500).json({
+      success: false,
+      error: error.message
     });
   }
 });

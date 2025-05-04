@@ -2,10 +2,15 @@ require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const admin = require('firebase-admin');
-const { initializeApp } = require('./services/firebase');
+
+// Import services from central index file to avoid circular dependencies
+const services = require('./services');
+const { initializeApp } = services.firebase;
+const { startAllMonitoring } = services.monitoring;
+
+// Import routes
 const tokenRoutes = require('./routes/tokens');
 const notificationRoutes = require('./routes/notifications');
-const { startAllMonitoring } = require('./services/monitoring');
 
 // Initialize Firebase Admin SDK
 initializeApp();
@@ -30,9 +35,19 @@ app.get('/health', (req, res) => {
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
-  
+
   // Start monitoring for events that trigger notifications
   startAllMonitoring();
+
+  // Run initial cleanup of old read notifications (older than 30 days)
+  const { cleanupReadNotifications } = services.notifications;
+  cleanupReadNotifications(30)
+    .then(result => {
+      console.log(`Initial cleanup completed: ${result.count} old notifications deleted`);
+    })
+    .catch(error => {
+      console.error('Error in initial cleanup:', error);
+    });
 });
 
 // Handle graceful shutdown
