@@ -1,0 +1,107 @@
+const express = require('express');
+const { sendNotificationToUser, sendNotificationToCommunity } = require('../services/notifications');
+
+const router = express.Router();
+
+// Send a notification to a specific user
+router.post('/send', async (req, res) => {
+  try {
+    const { userId, title, body, data } = req.body;
+    
+    // Validate required fields
+    if (!userId || !title || !body) {
+      return res.status(400).json({ 
+        success: false, 
+        error: 'Missing required fields: userId, title, body' 
+      });
+    }
+    
+    // Send notification
+    const result = await sendNotificationToUser(userId, title, body, data || {});
+    
+    if (result.success) {
+      return res.status(200).json(result);
+    } else {
+      return res.status(400).json(result);
+    }
+  } catch (error) {
+    console.error('Error sending notification:', error);
+    return res.status(500).json({ 
+      success: false, 
+      error: error.message 
+    });
+  }
+});
+
+// Send a notification to all users in a community
+router.post('/send-community', async (req, res) => {
+  try {
+    const { communityId, title, body, data, excludeUserId } = req.body;
+    
+    // Validate required fields
+    if (!communityId || !title || !body) {
+      return res.status(400).json({ 
+        success: false, 
+        error: 'Missing required fields: communityId, title, body' 
+      });
+    }
+    
+    // Send notification
+    const result = await sendNotificationToCommunity(
+      communityId, 
+      title, 
+      body, 
+      data || {}, 
+      excludeUserId
+    );
+    
+    if (result.success) {
+      return res.status(200).json(result);
+    } else {
+      return res.status(400).json(result);
+    }
+  } catch (error) {
+    console.error('Error sending community notification:', error);
+    return res.status(500).json({ 
+      success: false, 
+      error: error.message 
+    });
+  }
+});
+
+// Send a test notification
+router.post('/test', async (req, res) => {
+  try {
+    const { userId } = req.body;
+    
+    // Validate required fields
+    if (!userId) {
+      return res.status(400).json({ 
+        success: false, 
+        error: 'Missing required field: userId' 
+      });
+    }
+    
+    // Send test notification
+    const result = await sendNotificationToUser(
+      userId,
+      'Test Notification',
+      'This is a test notification from the PULSE notification server',
+      { type: 'test', timestamp: new Date().toISOString() }
+    );
+    
+    if (result.success) {
+      return res.status(200).json(result);
+    } else {
+      return res.status(400).json(result);
+    }
+  } catch (error) {
+    console.error('Error sending test notification:', error);
+    return res.status(500).json({ 
+      success: false, 
+      error: error.message 
+    });
+  }
+});
+
+module.exports = router;
