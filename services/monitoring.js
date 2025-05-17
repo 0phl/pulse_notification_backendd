@@ -20,18 +20,49 @@ const monitorCommunityNotices = () => {
         return;
       }
 
-      // Check if notice was created recently (within the last 30 seconds)
-      // Reduced from 5 minutes to 30 seconds to minimize delay
+      // IMPROVED: Extended time window for processing notices
+      // Check if notice was created recently (within the last 2 minutes)
+      // Increased from 30 seconds to 2 minutes to ensure we don't miss notices
       const now = Date.now();
       const createdAt = noticeData.createdAt || 0;
 
-      if (now - createdAt > 30 * 1000) {
-        // Skip notices older than 30 seconds
+      // Only skip notices that are extremely old (> 1 hour)
+      if (now - createdAt > 60 * 60 * 1000) {
+        // Skip notices older than 1 hour
         console.log(`Skipping notice ${noticeId} - too old (${Math.floor((now - createdAt)/1000)} seconds)`);
         return;
       }
-
-      console.log(`New community notice detected: ${noticeId}`);
+      
+      // For notices between 2 minutes and 1 hour old, log but still process them
+      if (now - createdAt > 2 * 60 * 1000) {
+        console.log(`Notice ${noticeId} is older than expected (${Math.floor((now - createdAt)/1000)} seconds), but still processing`);
+      } else {
+        console.log(`New community notice detected: ${noticeId}`);
+      }
+      
+      // Enhanced logging for better debugging
+      console.log(`[NOTICE DEBUG] Notice created by user: ${noticeData.authorId || 'unknown'}`);
+      console.log(`[NOTICE DEBUG] Notice title: "${noticeData.title || 'No title'}"`);
+      console.log(`[NOTICE DEBUG] Notice community: ${noticeData.communityId}`);
+      console.log(`[NOTICE DEBUG] Notice created at: ${new Date(createdAt).toISOString()}`);
+      
+      // Check if author is admin and store the status
+      let authorIsAdmin = false;
+      if (noticeData.authorId) {
+        try {
+          const authorDocRef = await firestore.collection('users').doc(noticeData.authorId).get();
+          if (authorDocRef.exists) {
+            const authorData = authorDocRef.data();
+            authorIsAdmin = authorData.isAdmin === true || authorData.role === 'admin';
+            if (authorIsAdmin) {
+              console.log(`[NOTICE DEBUG] Notice author ${noticeData.authorId} is an admin`);
+              // Don't exclude admins - they should get notifications like other users
+            }
+          }
+        } catch (error) {
+          console.error(`[NOTICE ERROR] Failed to check author admin status: ${error.message}`);
+        }
+      }
 
       // Check if notification for this notice already exists in Firestore
       // to prevent duplicate notifications
@@ -48,20 +79,79 @@ const monitorCommunityNotices = () => {
 
       // Send notification to all users in the community except the author
       const { sendNotificationToCommunity } = require('./notifications');
-      await sendNotificationToCommunity(
-        noticeData.communityId,
-        noticeData.title || 'New Community Notice',
-        noticeData.content?.substring(0, 100) || 'A new notice has been posted in your community.',
-        {
-          type: 'communityNotices',
+      
+      // Make sure to pass the authorId to exclude from notifications
+      if (!noticeData.authorId) {
+        console.log(`[NOTICE WARNING] No author ID found for notice ${noticeId}. Notifications might be sent to the author.`);
+      }
+      
+      // IMPROVED: Add retry logic for failed notification attempts
+      let retryCount = 0;
+      const maxRetries = 3;
+      let notificationResult;
+      
+      while (retryCount < maxRetries) {
+        try {
+          notificationResult = await sendNotificationToCommunity(
+            noticeData.communityId,
+            'Community Notice',
+            `${noticeData.authorName || 'Administrator'} posted new community notice: "${noticeData.title || 'Community Announcement'}"\n\n${noticeData.content?.substring(0, 100) || 'No additional details provided.'}${noticeData.content?.length > 100 ? '...' : ''}`,
+            {
+              type: 'communityNotices',
+              noticeId,
+              communityId: noticeData.communityId,
+              authorId: noticeData.authorId, // Include authorId in data for additional filtering
+              authorIsAdmin: authorIsAdmin ? 'true' : 'false', // Add admin status flag
+            },
+            noticeData.authorId // Exclude the author
+          );
+          
+          // If successful or partially successful, break out of retry loop
+          if (notificationResult.success || notificationResult.sentCount > 0) {
+            break;
+          }
+          
+          retryCount++;
+          console.log(`[NOTICE RETRY] Attempt ${retryCount}/${maxRetries} failed, retrying in 3 seconds...`);
+          await new Promise(resolve => setTimeout(resolve, 3000)); // Wait 3 seconds before retry
+        } catch (retryError) {
+          console.error(`[NOTICE ERROR] Retry ${retryCount + 1} failed with error:`, retryError);
+          retryCount++;
+          await new Promise(resolve => setTimeout(resolve, 3000)); // Wait 3 seconds before retry
+        }
+      }
+      
+      // Log outcome of notification attempt after retries
+      if (retryCount === maxRetries) {
+        console.error(`[NOTICE ERROR] Failed to send notification for notice ${noticeId} after ${maxRetries} attempts`);
+        // Record the failure for later analysis
+        await firestore.collection('failed_notifications').add({
           noticeId,
           communityId: noticeData.communityId,
           authorId: noticeData.authorId,
-        },
-        noticeData.authorId // Exclude the author
-      );
+          title: noticeData.title,
+          createdAt: admin.firestore.FieldValue.serverTimestamp(),
+          error: 'Maximum retry attempts reached',
+          noticeTimestamp: createdAt
+        });
+      } else if (notificationResult && notificationResult.sentCount > 0) {
+        console.log(`[NOTICE SUCCESS] Notification sent for notice ${noticeId} to ${notificationResult.sentCount} users after ${retryCount} retries`);
+      }
+      
     } catch (error) {
       console.error('Error processing new community notice:', error);
+      // Record the error for debugging
+      try {
+        const firestore = getFirestore();
+        await firestore.collection('notification_errors').add({
+          type: 'communityNotice',
+          timestamp: admin.firestore.FieldValue.serverTimestamp(),
+          error: error.message,
+          stack: error.stack
+        });
+      } catch (logError) {
+        console.error('Failed to log error:', logError);
+      }
     }
   });
 };
@@ -97,6 +187,9 @@ const monitorCommunityNoticeComments = () => {
       }
 
       const latestComment = commentsArray[0];
+      
+      // DEBUG LOGGING: Log the entire comment object to diagnose issues
+      console.log(`[COMMENT DEBUG] Latest comment on notice ${noticeId}:`, JSON.stringify(latestComment));
 
       // Check if the comment was just added (within the last 10 seconds)
       const now = Date.now();
@@ -115,10 +208,27 @@ const monitorCommunityNoticeComments = () => {
       const { sendNotificationToUser } = require('./notifications');
 
       // Make sure text exists and is a string before using substring
-      const commentText = latestComment.text || '';
-      const truncatedText = typeof commentText === 'string' ?
-        `"${commentText.substring(0, 50)}${commentText.length > 50 ? '...' : ''}"` :
-        '(No text)';
+      let commentText = latestComment.text || '';
+      
+      // Handle the case where text might be in a different property
+      if (!commentText && latestComment.content) {
+        commentText = latestComment.content;
+        console.log(`[COMMENT DEBUG] Using 'content' property instead of 'text' for comment ${latestComment.id}`);
+      }
+      
+      // Check if comment text is empty
+      if (!commentText || commentText.trim() === '') {
+        console.log(`[COMMENT DEBUG] WARNING: Empty comment text for comment ${latestComment.id}`);
+        commentText = "(No comment text)";
+      }
+      
+      // Ensure string type
+      commentText = String(commentText);
+      
+      // Truncate long comments
+      const truncatedText = `"${commentText.substring(0, 50)}${commentText.length > 50 ? '...' : ''}"`;
+      
+      console.log(`[COMMENT DEBUG] Sending notification with comment text: ${truncatedText}`);
 
       await sendNotificationToUser(
         noticeData.authorId,
@@ -130,6 +240,7 @@ const monitorCommunityNoticeComments = () => {
           commentId: latestComment.id,
           communityId: noticeData.communityId,
           authorId: latestComment.authorId,
+          commentText: commentText.substring(0, 100) // Include comment text in the data payload
         }
       );
     } catch (error) {
@@ -141,6 +252,7 @@ const monitorCommunityNoticeComments = () => {
 // Monitor for new likes on community notices
 const monitorCommunityNoticeLikes = () => {
   const db = getDatabase();
+  const firestore = getFirestore();
 
   console.log('Starting monitoring for new likes on community notices...');
 
@@ -170,34 +282,135 @@ const monitorCommunityNoticeLikes = () => {
         return;
       }
 
-      // Process each recent like
-      for (const latestLikerId of recentLikes) {
+      console.log(`[NOTICE_LIKE DEBUG] Recent likes detected on notice ${noticeId}: ${recentLikes.join(', ')}`);
+      console.log(`[NOTICE_LIKE DEBUG] Notice author: ${noticeData.authorId || 'unknown'}`);
 
+      // Check if any of the likers or the author is an admin (for debugging)
+      // Define authorIsAdmin and likerIsAdmin variables at a wider scope
+      let authorIsAdmin = false;
+      let likerIsAdmin = false;
+      
+      try {
+        const authorDocRef = await firestore.collection('users').doc(noticeData.authorId).get();
+        authorIsAdmin = authorDocRef.exists && (authorDocRef.data().isAdmin || authorDocRef.data().role === 'admin');
+        
+        if (authorIsAdmin) {
+          console.log(`[NOTICE_LIKE DEBUG] Notice author ${noticeData.authorId} is an admin`);
+        }
+        
+        // We'll set likerIsAdmin for the current liker inside the loop below
+      } catch (error) {
+        console.error(`[NOTICE_LIKE ERROR] Error checking author admin status: ${error.message}`);
+      }
+
+      // Process each recent like
+      for (const likerId of recentLikes) {
+        // Double check to avoid self-notifications
         // Don't send notification if the liker is the same as the notice author
-        if (latestLikerId === noticeData.authorId) {
+        if (likerId === noticeData.authorId) {
+          console.log(`[NOTICE_LIKE DEBUG] Skipping notification as user ${likerId} liked their own notice`);
           continue;
         }
 
-      console.log(`New like detected on notice ${noticeId} by user ${latestLikerId}`);
+        console.log(`New like detected on notice ${noticeId} by user ${likerId}`);
 
-      // Get liker's name
-      const likerSnapshot = await db.ref(`/users/${latestLikerId}`).once('value');
-      const likerData = likerSnapshot.val();
-      const likerName = likerData?.fullName || likerData?.username || 'Someone';
-
-      // Send notification to the notice author
-      const { sendNotificationToUser } = require('./notifications');
-      await sendNotificationToUser(
-        noticeData.authorId,
-        'New Like on Your Notice',
-        `${likerName} liked your notice: "${noticeData.title}"`,
-        {
-          type: 'socialInteractions',
-          noticeId,
-          communityId: noticeData.communityId,
-          likerId: latestLikerId,
+        // Check if this specific liker is an admin
+        try {
+          const likerDocRef = await firestore.collection('users').doc(likerId).get();
+          likerIsAdmin = likerDocRef.exists && (likerDocRef.data().isAdmin || likerDocRef.data().role === 'admin');
+          
+          if (likerIsAdmin) {
+            console.log(`[NOTICE_LIKE DEBUG] Liker ${likerId} is an admin`);
+          }
+        } catch (error) {
+          console.error(`[NOTICE_LIKE ERROR] Error checking liker admin status: ${error.message}`);
+          likerIsAdmin = false; // Reset in case of error
         }
-      );
+        
+        // Get liker's name with enhanced retrieval - check multiple data sources
+        let displayName = 'Someone';
+        
+        try {
+          // First try Realtime Database
+          const likerSnapshot = await db.ref(`/users/${likerId}`).once('value');
+          const likerData = likerSnapshot.val();
+          
+          if (likerData) {
+            console.log(`[NOTICE_LIKE DEBUG] Found user in RTDB: ${likerId}`);
+            displayName = likerData.fullName || likerData.displayName || likerData.username || displayName;
+          } else {
+            console.log(`[NOTICE_LIKE DEBUG] User not found in RTDB: ${likerId}`);
+          }
+          
+          // If we still don't have a name, check Firestore
+          if (displayName === 'Someone') {
+            const userDocRef = await firestore.collection('users').doc(likerId).get();
+            if (userDocRef.exists) {
+              const userData = userDocRef.data();
+              console.log(`[NOTICE_LIKE DEBUG] Found user in Firestore: ${likerId}`);
+              displayName = userData.fullName || userData.displayName || userData.username || displayName;
+            } else {
+              console.log(`[NOTICE_LIKE DEBUG] User not found in Firestore: ${likerId}`);
+            }
+          }
+          
+          // Final check in userProfiles collection if it exists
+          if (displayName === 'Someone') {
+            const profileDocRef = await firestore.collection('userProfiles').doc(likerId).get();
+            if (profileDocRef.exists) {
+              const profileData = profileDocRef.data();
+              console.log(`[NOTICE_LIKE DEBUG] Found user in userProfiles: ${likerId}`);
+              displayName = profileData.fullName || profileData.displayName || profileData.name || displayName;
+            }
+          }
+          
+          // If we STILL don't have a name, use first part of email or ID
+          if (displayName === 'Someone') {
+            // Try to get email from auth
+            try {
+              const userRecord = await admin.auth().getUser(likerId);
+              if (userRecord && userRecord.email) {
+                displayName = userRecord.email.split('@')[0]; // Use email username
+                console.log(`[NOTICE_LIKE DEBUG] Using email from Auth: ${displayName}`);
+              } else if (userRecord && userRecord.displayName) {
+                displayName = userRecord.displayName;
+                console.log(`[NOTICE_LIKE DEBUG] Using displayName from Auth: ${displayName}`);
+              }
+            } catch (authError) {
+              console.log(`[NOTICE_LIKE DEBUG] Auth lookup failed: ${authError.message}`);
+              // If everything fails, use shortened user ID instead of the full one
+              displayName = likerId.substring(0, 8) + '...';
+            }
+          }
+        } catch (error) {
+          console.error(`[NOTICE_LIKE ERROR] Error retrieving user data: ${error.message}`);
+          displayName = likerId.substring(0, 8) + '...'; // Shortened ID as fallback
+        }
+        
+        console.log(`[NOTICE_LIKE DEBUG] Final display name for ${likerId}: ${displayName}`);
+
+        // Prepare notice title
+        const noticeTitle = noticeData.title || 'your notice';
+        
+        // Send notification to the notice author with admin flags
+        const { sendNotificationToUser } = require('./notifications');
+        await sendNotificationToUser(
+          noticeData.authorId,
+          'New Like on Your Notice',
+          `${displayName} liked your notice: "${noticeTitle}"`,
+          {
+            type: 'socialInteractions',
+            noticeId,
+            communityId: noticeData.communityId,
+            likerId: likerId,             // ID of the person who liked the post (the actor)
+            noticeAuthorId: noticeData.authorId, // ID of the post author (recipient)
+            noticeTitle: noticeTitle.substring(0, 30), // Include title in payload
+            // Add admin flags to help with notification handling
+            authorIsAdmin: authorIsAdmin ? 'true' : 'false',
+            likerIsAdmin: likerIsAdmin ? 'true' : 'false',
+            isUserAdmin: authorIsAdmin ? 'true' : 'false' // Mark if recipient is admin
+          }
+        );
       }
     } catch (error) {
       console.error('Error processing new like:', error);
@@ -572,6 +785,215 @@ const monitorVolunteerPostJoins = () => {
     });
 };
 
+// Monitor for likes on comments
+const monitorCommentLikes = () => {
+  const db = getDatabase();
+  const firestore = getFirestore();
+
+  console.log('Starting monitoring for likes on comments...');
+
+  // Listen for changes to notices that have comments with likes
+  db.ref('/community_notices').on('child_changed', async (snapshot) => {
+    try {
+      const noticeData = snapshot.val();
+      const noticeId = snapshot.key;
+
+      if (!noticeData || !noticeData.comments) {
+        return;
+      }
+
+      // Get all comments
+      const comments = noticeData.comments || {};
+      
+      // Convert to array for easier processing
+      const commentsArray = Object.entries(comments).map(([commentId, commentData]) => ({
+        id: commentId,
+        ...commentData
+      }));
+      
+      // Process each comment to check for new likes
+      for (const comment of commentsArray) {
+        // Skip comments with no likes
+        if (!comment.likes) {
+          continue;
+        }
+        
+        // Find likes added in the last 10 seconds
+        const now = Date.now();
+        const recentLikes = Object.entries(comment.likes)
+          .filter(([_, likeData]) => {
+            const createdAt = likeData.createdAt || 0;
+            return (now - createdAt) < 10000; // 10 seconds
+          })
+          .map(([userId, _]) => userId);
+          
+        if (recentLikes.length === 0) {
+          continue;
+        }
+        
+        console.log(`[COMMENT_LIKE DEBUG] Recent likes detected on comment ${comment.id} in notice ${noticeId}: ${recentLikes.join(', ')}`);
+        
+        // Enhanced check: Don't send notifications to authors of their own content
+        // Check if the comment author is also the notice author
+        const isCommentFromNoticeAuthor = comment.authorId === noticeData.authorId;
+        if (isCommentFromNoticeAuthor) {
+          console.log(`[COMMENT_LIKE DEBUG] Comment ${comment.id} is from the notice author: ${comment.authorId}`);
+        }
+        
+        // Process each like separately
+        for (const likerId of recentLikes) {
+          // Don't send notification if the comment author and like author are the same
+          if (likerId === comment.authorId) {
+            console.log(`[COMMENT_LIKE DEBUG] Skipping notification as user ${likerId} liked their own comment`);
+            continue;
+          }
+          
+          // FIX: The post author SHOULD receive notifications when people like their comments
+          // The only time we want to skip notification is if the post author and comment author are the same
+          // AND the liker is different (which is handled by the previous condition)
+          
+          // Log action for debugging
+          if (likerId === noticeData.authorId) {
+            console.log(`[COMMENT_LIKE DEBUG] Post author ${likerId} liked a comment from user ${comment.authorId}`);
+          }
+          
+          // Check if either user is an admin and log for debugging purposes
+          let likerIsAdmin = false;
+          let commentAuthorIsAdmin = false;
+          let noticeAuthorIsAdmin = false;
+          
+          try {
+            const [likerDoc, commentAuthorDoc, noticeAuthorDoc] = await Promise.all([
+              firestore.collection('users').doc(likerId).get(),
+              firestore.collection('users').doc(comment.authorId).get(),
+              firestore.collection('users').doc(noticeData.authorId).get()
+            ]);
+            
+            likerIsAdmin = likerDoc.exists && (likerDoc.data().isAdmin || likerDoc.data().role === 'admin');
+            commentAuthorIsAdmin = commentAuthorDoc.exists && (commentAuthorDoc.data().isAdmin || commentAuthorDoc.data().role === 'admin');
+            noticeAuthorIsAdmin = noticeAuthorDoc.exists && (noticeAuthorDoc.data().isAdmin || noticeAuthorDoc.data().role === 'admin');
+            
+            if (likerIsAdmin) {
+              console.log(`[COMMENT_LIKE DEBUG] Liker ${likerId} is an admin`);
+            }
+            
+            if (commentAuthorIsAdmin) {
+              console.log(`[COMMENT_LIKE DEBUG] Comment author ${comment.authorId} is an admin`);
+            }
+            
+            if (noticeAuthorIsAdmin) {
+              console.log(`[COMMENT_LIKE DEBUG] Notice author ${noticeData.authorId} is an admin`);
+            }
+          } catch (error) {
+            console.error(`[COMMENT_LIKE ERROR] Error checking admin status: ${error.message}`);
+          }
+          
+          // Get liker's name with enhanced retrieval - check multiple data sources
+          let displayName = 'Someone';
+          
+          try {
+            // First try Realtime Database
+            const likerSnapshot = await db.ref(`/users/${likerId}`).once('value');
+            const likerData = likerSnapshot.val();
+            
+            if (likerData) {
+              console.log(`[COMMENT_LIKE DEBUG] Found user in RTDB: ${likerId}`);
+              displayName = likerData.fullName || likerData.displayName || likerData.username || displayName;
+            } else {
+              console.log(`[COMMENT_LIKE DEBUG] User not found in RTDB: ${likerId}`);
+            }
+            
+            // If we still don't have a name, check Firestore
+            if (displayName === 'Someone') {
+              const userDocRef = await firestore.collection('users').doc(likerId).get();
+              if (userDocRef.exists) {
+                const userData = userDocRef.data();
+                console.log(`[COMMENT_LIKE DEBUG] Found user in Firestore: ${likerId}`);
+                displayName = userData.fullName || userData.displayName || userData.username || displayName;
+              } else {
+                console.log(`[COMMENT_LIKE DEBUG] User not found in Firestore: ${likerId}`);
+              }
+            }
+            
+            // Final check in userProfiles collection if it exists
+            if (displayName === 'Someone') {
+              const profileDocRef = await firestore.collection('userProfiles').doc(likerId).get();
+              if (profileDocRef.exists) {
+                const profileData = profileDocRef.data();
+                console.log(`[COMMENT_LIKE DEBUG] Found user in userProfiles: ${likerId}`);
+                displayName = profileData.fullName || profileData.displayName || profileData.name || displayName;
+              }
+            }
+            
+            // If we STILL don't have a name, use first part of email or ID
+            if (displayName === 'Someone') {
+              // Try to get email from auth
+              try {
+                const userRecord = await admin.auth().getUser(likerId);
+                if (userRecord && userRecord.email) {
+                  displayName = userRecord.email.split('@')[0]; // Use email username
+                  console.log(`[COMMENT_LIKE DEBUG] Using email from Auth: ${displayName}`);
+                } else if (userRecord && userRecord.displayName) {
+                  displayName = userRecord.displayName;
+                  console.log(`[COMMENT_LIKE DEBUG] Using displayName from Auth: ${displayName}`);
+                }
+              } catch (authError) {
+                console.log(`[COMMENT_LIKE DEBUG] Auth lookup failed: ${authError.message}`);
+                // If everything fails, use shortened user ID instead of the full one
+                displayName = likerId.substring(0, 8) + '...';
+              }
+            }
+          } catch (error) {
+            console.error(`[COMMENT_LIKE ERROR] Error retrieving user data: ${error.message}`);
+            displayName = likerId.substring(0, 8) + '...'; // Shortened ID as fallback
+          }
+          
+          console.log(`[COMMENT_LIKE DEBUG] Final display name for ${likerId}: ${displayName}`);
+          
+          // Get comment text for the notification
+          let commentText = comment.text || comment.content || '';
+          if (commentText.length > 30) {
+            commentText = commentText.substring(0, 30) + '...';
+          }
+          
+          // If comment text is empty or undefined, use a default message
+          if (!commentText || commentText.trim() === '') {
+            commentText = '(No comment text)';
+          }
+          
+          console.log(`[COMMENT_LIKE DEBUG] Sending notification to ${comment.authorId} about like from ${displayName} on comment: "${commentText}"`);
+          
+          // Send notification to the comment author with enhanced data
+          const { sendNotificationToUser } = require('./notifications');
+          await sendNotificationToUser(
+            comment.authorId,
+            'New Like on Your Comment',
+            `${displayName} liked your comment: "${commentText}"`,
+            {
+              type: 'socialInteractions',
+              noticeId,
+              commentId: comment.id,
+              communityId: noticeData.communityId,
+              likerId: likerId,
+              commentText: commentText,
+              // Include author IDs to help with filtering
+              commentAuthorId: comment.authorId,
+              noticeAuthorId: noticeData.authorId,
+              // Add admin status information
+              likerIsAdmin: likerIsAdmin ? 'true' : 'false',
+              commentAuthorIsAdmin: commentAuthorIsAdmin ? 'true' : 'false',
+              noticeAuthorIsAdmin: noticeAuthorIsAdmin ? 'true' : 'false',
+              isUserAdmin: commentAuthorIsAdmin ? 'true' : 'false' // Flag if recipient is admin
+            }
+          );
+        }
+      }
+    } catch (error) {
+      console.error('[COMMENT_LIKE ERROR] Error processing comment likes:', error);
+    }
+  });
+};
+
 // Start all monitoring functions
 const startAllMonitoring = () => {
   try {
@@ -583,6 +1005,7 @@ const startAllMonitoring = () => {
     monitorReportStatusUpdates();
     monitorVolunteerPosts();
     monitorVolunteerPostJoins();
+    monitorCommentLikes();
 
     console.log('All monitoring services started successfully');
   } catch (error) {
@@ -600,5 +1023,6 @@ module.exports = {
   monitorReportStatusUpdates,
   monitorVolunteerPosts,
   monitorVolunteerPostJoins,
+  monitorCommentLikes,
   startAllMonitoring
 };
