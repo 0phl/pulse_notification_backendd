@@ -52,6 +52,8 @@ class NotificationService {
     if (_initialized) return;
 
     try {
+      debugPrint('Initializing NotificationService...');
+
       // Request permission
       await _requestPermission();
 
@@ -60,17 +62,53 @@ class NotificationService {
       _configureBackgroundMessageHandler();
       _configureMessageOpenedAppHandler();
 
+      // Check if user is logged in
+      final user = _auth.currentUser;
+      if (user != null) {
+        debugPrint('User is logged in: ${user.uid}');
+
+        // Check if user_tokens document exists and if loggedOut flag is set
+        try {
+          final userTokenDoc = await _firestore.collection('user_tokens').doc(user.uid).get();
+
+          if (userTokenDoc.exists) {
+            final data = userTokenDoc.data();
+            final wasLoggedOut = data?['loggedOut'] == true;
+            final tokens = data?['tokens'] as List<dynamic>? ?? [];
+
+            debugPrint('User token document exists - loggedOut: $wasLoggedOut, token count: ${tokens.length}');
+
+            if (wasLoggedOut || tokens.isEmpty) {
+              debugPrint('User was logged out or has no tokens, forcing token refresh');
+
+              // Force delete the token first to ensure a clean state
+              try {
+                await _messaging.deleteToken();
+                debugPrint('Deleted existing token to force refresh');
+              } catch (e) {
+                debugPrint('Error deleting token: $e');
+              }
+            }
+          } else {
+            debugPrint('User token document does not exist, will create one');
+          }
+        } catch (e) {
+          debugPrint('Error checking user_tokens document: $e');
+        }
+      } else {
+        debugPrint('No user is logged in');
+      }
+
       // Get and save FCM token
       await _getAndSaveToken();
 
       // Listen for token refreshes
       _messaging.onTokenRefresh.listen(_updateToken);
 
-      // Ensure user_tokens document exists
+      // Ensure user_tokens document exists with correct settings
       await _ensureUserTokensDocumentExists();
 
       // Clean up read notifications to save storage space
-      final user = _auth.currentUser;
       if (user != null) {
         try {
           await cleanupReadNotifications();
@@ -85,6 +123,39 @@ class NotificationService {
       } catch (e) {
         debugPrint('Warning: Could not set up local notifications: $e');
         debugPrint('Push notifications may still work, but foreground notifications might not show');
+      }
+
+      // Verify token was saved correctly
+      if (user != null) {
+        try {
+          final verifyDoc = await _firestore.collection('user_tokens').doc(user.uid).get();
+          if (verifyDoc.exists) {
+            final data = verifyDoc.data();
+            final tokens = data?['tokens'] as List<dynamic>? ?? [];
+            final loggedOut = data?['loggedOut'] as bool? ?? false;
+
+            debugPrint('Final verification - Token count: ${tokens.length}, loggedOut: $loggedOut');
+
+            if (tokens.isEmpty || loggedOut) {
+              debugPrint('WARNING: After initialization, tokens still empty or user still marked as logged out!');
+              debugPrint('Will force one more token refresh...');
+
+              // Force one more token refresh as a last resort
+              try {
+                await _messaging.deleteToken();
+                final newToken = await _messaging.getToken();
+                if (newToken != null) {
+                  await _updateToken(newToken);
+                  debugPrint('Final forced token refresh completed');
+                }
+              } catch (e) {
+                debugPrint('Error during final token refresh: $e');
+              }
+            }
+          }
+        } catch (e) {
+          debugPrint('Error during final token verification: $e');
+        }
       }
 
       _initialized = true;
@@ -122,26 +193,45 @@ class NotificationService {
           },
           'tokens': [],
           'createdAt': FieldValue.serverTimestamp(),
+          'loggedOut': false, // Ensure loggedOut is set to false for new documents
         });
         debugPrint('Created user_tokens document for user: ${user.uid}');
       } else {
         debugPrint('User_tokens document already exists for user: ${user.uid}');
         final data = docSnapshot.data();
         if (data != null) {
+          // Check if user was previously logged out
+          final wasLoggedOut = data['loggedOut'] == true;
+
+          // Check if we need to update the document
+          bool needsUpdate = false;
+          Map<String, dynamic> updateData = {};
+
           // Check if notificationPreferences exists
           if (!data.containsKey('notificationPreferences')) {
-            debugPrint('notificationPreferences field missing, adding default preferences');
-            await _firestore.collection('user_tokens').doc(user.uid).update({
-              'notificationPreferences': {
-                'communityNotices': true,
-                'socialInteractions': true,
-                'marketplace': true,
-                'chat': true,
-                'reports': true,
-                'volunteer': true,
-              },
-            });
-            debugPrint('Added default notification preferences');
+            debugPrint('notificationPreferences field missing, will add default preferences');
+            updateData['notificationPreferences'] = {
+              'communityNotices': true,
+              'socialInteractions': true,
+              'marketplace': true,
+              'chat': true,
+              'reports': true,
+              'volunteer': true,
+            };
+            needsUpdate = true;
+          }
+
+          // Reset loggedOut flag if it was previously set to true
+          if (wasLoggedOut) {
+            debugPrint('User was previously logged out, will reset loggedOut flag');
+            updateData['loggedOut'] = false;
+            needsUpdate = true;
+          }
+
+          // Apply updates if needed
+          if (needsUpdate) {
+            await _firestore.collection('user_tokens').doc(user.uid).update(updateData);
+            debugPrint('Updated user_tokens document with new settings');
           }
 
           final tokens = data['tokens'] as List<dynamic>? ?? [];
@@ -149,7 +239,9 @@ class NotificationService {
 
           // Check if tokens field is properly initialized
           if (tokens.isEmpty) {
-            debugPrint('Tokens array is empty');
+            debugPrint('Tokens array is empty, will get a new token');
+            // Force token refresh if the tokens array is empty
+            await _getAndSaveToken();
           } else {
             debugPrint('Tokens array contains ${tokens.length} entries');
           }
@@ -560,7 +652,85 @@ class NotificationService {
         debugPrint('Copy this token to use in Firebase Console');
         debugPrint('==========================================');
 
-        await _updateToken(_token!);
+        // Check if user_tokens document exists and has loggedOut flag
+        final user = _auth.currentUser;
+        if (user != null) {
+          try {
+            final userTokenDoc = await _firestore.collection('user_tokens').doc(user.uid).get();
+
+            if (userTokenDoc.exists) {
+              final data = userTokenDoc.data();
+              final wasLoggedOut = data?['loggedOut'] == true;
+
+              if (wasLoggedOut) {
+                debugPrint('User was previously logged out, forcing token update to reset loggedOut flag');
+                // Force delete the token first to ensure a clean state
+                try {
+                  await _messaging.deleteToken();
+                  debugPrint('Deleted existing token to force refresh');
+                  // Get a new token
+                  _token = await _messaging.getToken();
+                  debugPrint('New token after forced refresh: $_token');
+                } catch (e) {
+                  debugPrint('Error during forced token refresh: $e');
+                }
+              }
+            }
+          } catch (e) {
+            debugPrint('Error checking user_tokens document: $e');
+          }
+        }
+
+        // Save the token with updated logic
+        if (_token != null) {
+          await _updateToken(_token!);
+
+          // Verify token was saved by reading it back
+          final user = _auth.currentUser;
+          if (user != null) {
+            try {
+              final verifyDoc = await _firestore.collection('user_tokens').doc(user.uid).get();
+              if (verifyDoc.exists) {
+                final data = verifyDoc.data();
+                final tokens = data?['tokens'] as List<dynamic>? ?? [];
+                final loggedOut = data?['loggedOut'] as bool? ?? false;
+
+                debugPrint('Verification - Token count: ${tokens.length}, loggedOut: $loggedOut');
+
+                if (tokens.isEmpty || loggedOut) {
+                  debugPrint('WARNING: Tokens still empty or user still marked as logged out after update!');
+
+                  // Force update with direct set operation as a last resort
+                  final now = Timestamp.now();
+                  final tokenData = {
+                    'token': _token,
+                    'platform': Platform.isAndroid ? 'android' : 'ios',
+                    'createdAt': now,
+                    'lastActive': now,
+                  };
+
+                  await _firestore.collection('user_tokens').doc(user.uid).set({
+                    'tokens': [tokenData],
+                    'loggedOut': false,
+                    'lastActive': FieldValue.serverTimestamp(),
+                    'notificationPreferences': {
+                      'communityNotices': true,
+                      'socialInteractions': true,
+                      'marketplace': true,
+                      'chat': true,
+                      'reports': true,
+                      'volunteer': true,
+                    },
+                  }, SetOptions(merge: true));
+
+                  debugPrint('Forced token update with merge operation');
+                }
+              }
+            } catch (e) {
+              debugPrint('Error verifying token update: $e');
+            }
+          }
+        }
       } else {
         debugPrint('ERROR: FCM token is null!');
         debugPrint('This might be due to missing Firebase Messaging plugin registration');
@@ -687,10 +857,20 @@ class NotificationService {
 
         // Update document with optimized settings
         debugPrint('Updating document with ${updatedTokens.length} tokens');
+
+        // Check if the user was previously logged out
+        final wasLoggedOut = data?['loggedOut'] == true;
+        if (wasLoggedOut) {
+          debugPrint('User was previously logged out, resetting loggedOut flag');
+        }
+
+        // Always set loggedOut to false when updating tokens, regardless of previous state
         await _firestore.collection('user_tokens').doc(user.uid).update({
           'tokens': updatedTokens,
           'lastActive': FieldValue.serverTimestamp(),
           'lastTokenUpdate': now,
+          // Always reset loggedOut flag when updating tokens
+          'loggedOut': false,
           'deviceInfo': {
             'platform': Platform.operatingSystem,
             'version': Platform.operatingSystemVersion,
@@ -716,6 +896,7 @@ class NotificationService {
           'createdAt': FieldValue.serverTimestamp(),
           'lastActive': now,
           'lastTokenUpdate': now,
+          'loggedOut': false, // Explicitly set loggedOut to false for new documents
           'deviceInfo': {
             'platform': Platform.operatingSystem,
             'version': Platform.operatingSystemVersion,
@@ -731,6 +912,7 @@ class NotificationService {
       if (verifyDoc.exists) {
         final data = verifyDoc.data();
         final tokens = data?['tokens'] as List<dynamic>? ?? [];
+        final loggedOut = data?['loggedOut'] as bool? ?? false;
         bool tokenFound = false;
 
         for (final t in tokens) {
@@ -742,8 +924,24 @@ class NotificationService {
 
         if (tokenFound) {
           debugPrint('Token verified in Firestore');
+          if (loggedOut) {
+            debugPrint('WARNING: User still marked as logged out after update! Forcing update...');
+            // Force update loggedOut flag if it's still true
+            await _firestore.collection('user_tokens').doc(user.uid).update({
+              'loggedOut': false,
+            });
+          }
         } else {
-          debugPrint('WARNING: Token not found in Firestore after update!');
+          debugPrint('WARNING: Token not found in Firestore after update! Forcing update...');
+
+          // Force update with direct set operation as a last resort
+          await _firestore.collection('user_tokens').doc(user.uid).set({
+            'tokens': [tokenData],
+            'loggedOut': false,
+            'lastActive': FieldValue.serverTimestamp(),
+          }, SetOptions(merge: true));
+
+          debugPrint('Forced token update with merge operation');
         }
       }
     } catch (e) {
@@ -759,11 +957,12 @@ class NotificationService {
           'createdAt': Timestamp.now(),
         };
 
-        // Update with minimal data
-        await _firestore.collection('user_tokens').doc(user.uid).update({
-          'tokens': FieldValue.arrayUnion([simpleTokenData]),
+        // Update with minimal data - always set loggedOut to false
+        await _firestore.collection('user_tokens').doc(user.uid).set({
+          'tokens': [simpleTokenData],
           'lastActive': FieldValue.serverTimestamp(),
-        });
+          'loggedOut': false,
+        }, SetOptions(merge: true));
 
         debugPrint('Token updated with fallback method');
       } catch (fallbackError) {
@@ -1282,6 +1481,187 @@ class NotificationService {
     } catch (e) {
       debugPrint('Error getting user community ID: $e');
       return null;
+    }
+  }
+
+  // Reset FCM token after login
+  Future<void> resetTokenAfterLogin() async {
+    try {
+      final user = _auth.currentUser;
+      if (user == null) {
+        debugPrint('Cannot reset token: No user is logged in');
+        return;
+      }
+
+      final userId = user.uid;
+      debugPrint('Resetting FCM token after login for user: $userId');
+
+      // Force delete the existing token to ensure a clean state
+      try {
+        await _messaging.deleteToken();
+        debugPrint('Deleted existing token to force refresh');
+      } catch (e) {
+        debugPrint('Error deleting token: $e');
+      }
+
+      // Get a new token
+      String? newToken;
+      try {
+        newToken = await _messaging.getToken();
+        debugPrint('New token obtained after login: $newToken');
+      } catch (e) {
+        debugPrint('Error getting new token: $e');
+      }
+
+      if (newToken == null) {
+        debugPrint('Failed to get new token after login');
+        return;
+      }
+
+      // Directly set the token and loggedOut flag in Firestore
+      final now = Timestamp.now();
+      final tokenData = {
+        'token': newToken,
+        'platform': Platform.isAndroid ? 'android' : 'ios',
+        'createdAt': now,
+        'lastActive': now,
+      };
+
+      // Update the document with the new token and reset loggedOut flag
+      await _firestore.collection('user_tokens').doc(userId).set({
+        'tokens': [tokenData],
+        'loggedOut': false,
+        'lastActive': FieldValue.serverTimestamp(),
+        'lastTokenUpdate': now,
+        'notificationPreferences': {
+          'communityNotices': true,
+          'socialInteractions': true,
+          'marketplace': true,
+          'chat': true,
+          'reports': true,
+          'volunteer': true,
+        },
+      }, SetOptions(merge: true));
+
+      debugPrint('FCM token reset after login for user: $userId');
+
+      // Verify the update was successful
+      final verifyDoc = await _firestore.collection('user_tokens').doc(userId).get();
+      if (verifyDoc.exists) {
+        final data = verifyDoc.data();
+        final tokens = data?['tokens'] as List<dynamic>? ?? [];
+        final loggedOut = data?['loggedOut'] as bool? ?? false;
+
+        debugPrint('Verification after login - Token count: ${tokens.length}, loggedOut: $loggedOut');
+
+        if (loggedOut || tokens.isEmpty) {
+          debugPrint('WARNING: Tokens still empty or user still marked as logged out! Forcing update...');
+
+          // Force update with direct set operation as a last resort
+          await _firestore.collection('user_tokens').doc(userId).update({
+            'tokens': [tokenData],
+            'loggedOut': false,
+          });
+
+          debugPrint('Forced token update after login');
+        }
+      }
+    } catch (e) {
+      debugPrint('Error resetting FCM token after login: $e');
+    }
+  }
+
+  // Remove FCM tokens when user logs out
+  Future<void> removeUserTokens() async {
+    try {
+      final user = _auth.currentUser;
+      if (user == null) {
+        debugPrint('Cannot remove tokens: No user is logged in');
+        return;
+      }
+
+      final userId = user.uid;
+      debugPrint('Removing FCM tokens for user: $userId');
+
+      // Delete the current token from Firebase Messaging first
+      try {
+        await _messaging.deleteToken();
+        debugPrint('FCM token deleted from device');
+      } catch (e) {
+        debugPrint('Error deleting FCM token from device: $e');
+      }
+
+      // Get the current token document
+      final tokenDoc = await _firestore.collection('user_tokens').doc(userId).get();
+
+      if (tokenDoc.exists) {
+        // Update the document to clear tokens
+        await _firestore.collection('user_tokens').doc(userId).set({
+          'tokens': [],
+          'lastActive': FieldValue.serverTimestamp(),
+          'loggedOut': true,
+          'loggedOutAt': FieldValue.serverTimestamp(),
+        }, SetOptions(merge: true));
+
+        debugPrint('FCM tokens removed for user: $userId');
+
+        // Verify the update was successful
+        final verifyDoc = await _firestore.collection('user_tokens').doc(userId).get();
+        if (verifyDoc.exists) {
+          final data = verifyDoc.data();
+          final tokens = data?['tokens'] as List<dynamic>? ?? [];
+          final loggedOut = data?['loggedOut'] as bool? ?? false;
+
+          debugPrint('Verification after logout - Token count: ${tokens.length}, loggedOut: $loggedOut');
+
+          if (!loggedOut || tokens.isNotEmpty) {
+            debugPrint('WARNING: Tokens not properly cleared or loggedOut flag not set! Forcing update...');
+
+            // Force update with direct set operation as a last resort
+            await _firestore.collection('user_tokens').doc(userId).update({
+              'tokens': [],
+              'loggedOut': true,
+            });
+
+            debugPrint('Forced token removal');
+          }
+        }
+      } else {
+        debugPrint('No token document found for user: $userId');
+
+        // Create a document with loggedOut set to true
+        await _firestore.collection('user_tokens').doc(userId).set({
+          'tokens': [],
+          'loggedOut': true,
+          'loggedOutAt': FieldValue.serverTimestamp(),
+          'notificationPreferences': {
+            'communityNotices': true,
+            'socialInteractions': true,
+            'marketplace': true,
+            'chat': true,
+            'reports': true,
+            'volunteer': true,
+          },
+        });
+
+        debugPrint('Created user_tokens document with loggedOut=true for user: $userId');
+      }
+    } catch (e) {
+      debugPrint('Error removing FCM tokens: $e');
+
+      // Last resort fallback
+      try {
+        final user = _auth.currentUser;
+        if (user != null) {
+          await _firestore.collection('user_tokens').doc(user.uid).update({
+            'tokens': [],
+            'loggedOut': true,
+          });
+          debugPrint('Used fallback method to remove tokens');
+        }
+      } catch (fallbackError) {
+        debugPrint('Fallback token removal also failed: $fallbackError');
+      }
     }
   }
 }

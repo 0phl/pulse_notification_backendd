@@ -392,6 +392,10 @@ const sendNotificationToUser = async (userId, title, body, data = {}) => {
         const isAdmin = data.isUserAdmin === 'true' || 
                       (data.noticeAuthorId === userId && data.authorIsAdmin === 'true');
         
+        if (isAdmin) {
+          console.log(`[NOTIFICATION DEBUG] Preparing ADMIN notification with special handling for user: ${userId}`);
+        }
+        
         // Create notification message for a single token with optimized delivery settings
         // Restructuring payload to match exactly what the Flutter app expects
         const message = {
@@ -419,7 +423,8 @@ const sendNotificationToUser = async (userId, title, body, data = {}) => {
             notification: {
               // Use a different channel for admins to bypass potential channel restrictions
               channelId: isAdmin ? 'admin_high_importance_channel' : 'high_importance_channel',
-              priority: 'high',
+              // FCM doesn't support the importance field directly 
+              // Only use fields that FCM API supports
               defaultSound: true,
               defaultVibrateTimings: true,
               visibility: 'public',
@@ -652,6 +657,10 @@ const sendNotificationToCommunity = async (communityId, title, body, data = {}, 
             const isAdmin = data.isUserAdmin === 'true' || 
                         (data.noticeAuthorId === userId && data.authorIsAdmin === 'true');
                         
+            if (isAdmin) {
+              console.log(`[NOTIFICATION DEBUG] Preparing community ADMIN notification with special handling for user: ${userId}`);
+            }
+            
             // Restructuring payload to match exactly what the Flutter app expects
             const message = {
               notification: {
@@ -676,7 +685,8 @@ const sendNotificationToCommunity = async (communityId, title, body, data = {}, 
                 notification: {
                   // Use a different channel for admins to bypass potential channel restrictions
                   channelId: isAdmin ? 'admin_high_importance_channel' : 'high_importance_channel',
-                  priority: 'high',
+                  // FCM doesn't support the importance field directly
+                  // Only use fields that FCM API supports
                   defaultSound: true,
                   defaultVibrateTimings: true,
                   visibility: 'public',
