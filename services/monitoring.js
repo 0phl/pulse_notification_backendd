@@ -994,6 +994,485 @@ const monitorCommentLikes = () => {
   });
 };
 
+// Monitor for comment replies
+const monitorCommentReplies = () => {
+  const db = getDatabase();
+  const firestore = getFirestore();
+
+  console.log('Starting monitoring for comment replies...');
+
+  // Listen for changes in community notices that might contain new replies
+  db.ref('/community_notices').on('child_changed', async (snapshot) => {
+    try {
+      const noticeData = snapshot.val();
+      const noticeId = snapshot.key;
+
+      if (!noticeData || !noticeData.comments) {
+        return;
+      }
+
+      // Process each comment to check for replies
+      const commentsObj = noticeData.comments || {};
+      
+      for (const commentId in commentsObj) {
+        const comment = commentsObj[commentId];
+        
+        // Skip if no replies
+        if (!comment.replies) {
+          continue;
+        }
+        
+        // Convert replies object to array with IDs
+        const repliesObj = comment.replies || {};
+        const repliesArray = Object.entries(repliesObj).map(([replyId, data]) => ({
+          id: replyId,
+          ...data,
+          createdAt: data.createdAt || 0
+        }));
+        
+        // Skip if no replies
+        if (repliesArray.length === 0) {
+          continue;
+        }
+        
+        // Sort by createdAt (newest first)
+        repliesArray.sort((a, b) => b.createdAt - a.createdAt);
+        
+        // Get the latest reply
+        const latestReply = repliesArray[0];
+        
+        // Check if the reply was just added (within the last 10 seconds)
+        const now = Date.now();
+        if (now - latestReply.createdAt > 10000) {
+          continue;
+        }
+        
+        console.log(`[REPLY DEBUG] Latest reply on comment ${commentId} in notice ${noticeId}:`, JSON.stringify(latestReply));
+        
+        // Check if this is a reply to a specific user (mentioned with @username) before skipping based on author
+        const content = latestReply.content || '';
+        const mentionMatch = content.match(/@([a-zA-Z0-9_]+(?:\s+[a-zA-Z0-9_]+)*)/);
+        let mentionedUsername = null;
+        let mentionedUserId = null;
+        let replyToUserId = null;
+        
+        // First check if this is a reply to another reply (using replyToId)
+        if (latestReply.replyToId) {
+          console.log(`[REPLY DEBUG] This is a reply to another reply: ${latestReply.replyToId}`);
+          
+          // Find the reply that this is responding to
+          for (const replyObj of repliesArray) {
+            if (replyObj.id === latestReply.replyToId) {
+              replyToUserId = replyObj.authorId;
+              console.log(`[REPLY DEBUG] Found reply target user: ${replyToUserId}`);
+              break;
+            }
+          }
+        }
+        
+        if (mentionMatch && mentionMatch[1]) {
+          mentionedUsername = mentionMatch[1].trim();
+          console.log(`[REPLY DEBUG] Username mention detected: "${mentionedUsername}"`);
+          
+          // Look up the user ID by their username/name
+          try {
+            // Add more logging to help troubleshoot
+            console.log(`[REPLY DEBUG] Searching for user with displayName "${mentionedUsername}" in Firestore`);
+            
+            // Search for mentioned user in Firestore by displayName or username
+            const usersSnapshot = await firestore.collection('users')
+              .where('displayName', '==', mentionedUsername)
+              .limit(1)
+              .get();
+            
+            if (!usersSnapshot.empty) {
+              const mentionedUserDoc = usersSnapshot.docs[0];
+              mentionedUserId = mentionedUserDoc.id;
+              console.log(`[REPLY DEBUG] Found mentioned user ID: ${mentionedUserId}`);
+            } else {
+              console.log(`[REPLY DEBUG] No user found with exact displayName match, trying alternative lookups`);
+              
+              // Try a more flexible search approach - get all users and do client-side filtering
+              const allUsersSnapshot = await firestore.collection('users')
+                .limit(100)  // Limit to first 100 users to avoid excessive data transfer
+                .get();
+                
+              const potentialMatches = [];
+              allUsersSnapshot.forEach(doc => {
+                const userData = doc.data();
+                const displayName = userData.displayName || userData.fullName || userData.username || '';
+                
+                // Check if display name contains the mentioned username (case insensitive)
+                if (displayName.toLowerCase().includes(mentionedUsername.toLowerCase())) {
+                  potentialMatches.push({
+                    id: doc.id,
+                    displayName: displayName,
+                    exactMatch: displayName.toLowerCase() === mentionedUsername.toLowerCase()
+                  });
+                }
+              });
+              
+              console.log(`[REPLY DEBUG] Found ${potentialMatches.length} potential matches:`, JSON.stringify(potentialMatches));
+              
+              // Use the best match (prefer exact match, otherwise first partial match)
+              const exactMatch = potentialMatches.find(match => match.exactMatch);
+              if (exactMatch) {
+                mentionedUserId = exactMatch.id;
+                console.log(`[REPLY DEBUG] Using exact match: ${mentionedUserId} (${exactMatch.displayName})`);
+              } else if (potentialMatches.length > 0) {
+                mentionedUserId = potentialMatches[0].id;
+                console.log(`[REPLY DEBUG] Using best partial match: ${mentionedUserId} (${potentialMatches[0].displayName})`);
+              } else {
+                // Final attempt: try to find the user in Firebase Auth
+                try {
+                  console.log(`[REPLY DEBUG] No matches found in Firestore, trying Firebase Auth lookup`);
+                  // This is a basic implementation - in a real app, you'd need proper security rules
+                  // Get a list of users from auth (up to 1000 users)
+                  const listUsersResult = await admin.auth().listUsers(1000);
+                  
+                  // Search for matching displayName in auth users
+                  const authMatch = listUsersResult.users.find(user => {
+                    const authDisplayName = user.displayName || '';
+                    return authDisplayName.toLowerCase().includes(mentionedUsername.toLowerCase());
+                  });
+                  
+                  if (authMatch) {
+                    mentionedUserId = authMatch.uid;
+                    console.log(`[REPLY DEBUG] Found user in Firebase Auth: ${mentionedUserId} (${authMatch.displayName || authMatch.email})`);
+                  } else {
+                    console.log(`[REPLY DEBUG] No matching user found in Firebase Auth`);
+                  }
+                } catch (authError) {
+                  console.error(`[REPLY ERROR] Error looking up user in Firebase Auth: ${authError.message}`);
+                }
+              }
+            }
+          } catch (error) {
+            console.error(`[REPLY ERROR] Error processing user mention: ${error.message}`);
+          }
+        }
+        
+        // If we have a replyToId but couldn't find a mention, use the replyToUserId
+        if (!mentionedUserId && replyToUserId) {
+          mentionedUserId = replyToUserId;
+          console.log(`[REPLY DEBUG] Using replyToUserId as mentionedUserId: ${mentionedUserId}`);
+        }
+        
+        // If the reply author is the same as the comment author AND there's no mention/replyTo, skip notification
+        // However, if there's a mention to another user, we should continue processing to send the mention notification
+        if (latestReply.authorId === comment.authorId && !mentionedUserId) {
+          console.log(`[REPLY DEBUG] Skipping notification as reply author ${latestReply.authorId} is the same as comment author and no mention was found`);
+          continue;
+        } else if (latestReply.authorId === comment.authorId && mentionedUserId) {
+          console.log(`[REPLY DEBUG] Comment author is replying with a mention to user ${mentionedUserId}, will send mention notification`);
+          // Continue processing for the mention notification
+        }
+        
+        // Get commenter's name for the notification
+        let replyAuthorName = 'Someone';
+        
+        try {
+          // Try multiple sources to get the reply author's name
+          // First try Realtime Database
+          const authorSnapshot = await db.ref(`/users/${latestReply.authorId}`).once('value');
+          const authorData = authorSnapshot.val();
+          
+          if (authorData) {
+            replyAuthorName = authorData.fullName || authorData.displayName || authorData.username || replyAuthorName;
+          } else {
+            // If not in RTDB, check Firestore
+            const userDocRef = await firestore.collection('users').doc(latestReply.authorId).get();
+            if (userDocRef.exists) {
+              const userData = userDocRef.data();
+              replyAuthorName = userData.fullName || userData.displayName || userData.username || replyAuthorName;
+            } else {
+              // Final check in userProfiles collection
+              const profileDocRef = await firestore.collection('userProfiles').doc(latestReply.authorId).get();
+              if (profileDocRef.exists) {
+                const profileData = profileDocRef.data();
+                replyAuthorName = profileData.fullName || profileData.displayName || profileData.name || replyAuthorName;
+              }
+            }
+          }
+        } catch (error) {
+          console.error(`[REPLY ERROR] Error retrieving reply author data: ${error.message}`);
+        }
+        
+        // Format the reply content for notification
+        let replyContent = latestReply.content || '';
+        if (typeof replyContent !== 'string') {
+          replyContent = String(replyContent || '');
+        }
+        
+        if (replyContent.length > 50) {
+          replyContent = replyContent.substring(0, 50) + '...';
+        }
+        
+        if (!replyContent || replyContent.trim() === '') {
+          replyContent = '(No reply text)';
+        }
+        
+        console.log(`[REPLY DEBUG] Sending notification to ${comment.authorId} about reply from ${replyAuthorName}: "${replyContent}"`);
+        
+        // Send notification to the comment author
+        const { sendNotificationToUser } = require('./notifications');
+        
+        // Only send notification to comment author if they're not the same as reply author
+        if (comment.authorId !== latestReply.authorId) {
+          await sendNotificationToUser(
+            comment.authorId,
+            'New Reply to Your Comment',
+            `${replyAuthorName} replied to your comment: "${replyContent}"`,
+            {
+              type: 'socialInteractions',
+              noticeId,
+              commentId,
+              replyId: latestReply.id,
+              communityId: noticeData.communityId,
+              authorId: latestReply.authorId,
+              replyText: replyContent,
+              parentCommentId: commentId,
+              parentCommentAuthorId: comment.authorId
+            }
+          );
+        }
+        
+        // If there's a mention, send notification to the mentioned user (if not already sent above)
+        if (mentionedUserId && mentionedUserId !== latestReply.authorId) {
+          // If the mentioned user is the comment author and the reply author is different, we've already sent them a notification above
+          // Only need to send another notification if they're not the comment author, or if the reply author is the comment author
+          if (mentionedUserId !== comment.authorId || latestReply.authorId === comment.authorId) {
+            console.log(`[REPLY DEBUG] Sending mention notification to user ${mentionedUserId}`);
+            
+            // Send notification to the mentioned user
+            await sendNotificationToUser(
+              mentionedUserId,
+              'You Were Mentioned in a Reply',
+              `${replyAuthorName} mentioned you in a reply: "${replyContent}"`,
+              {
+                type: 'socialInteractions',
+                noticeId,
+                commentId,
+                replyId: latestReply.id,
+                communityId: noticeData.communityId,
+                authorId: latestReply.authorId,
+                replyText: replyContent,
+                mentioned: true,
+                mentionedUserId: mentionedUserId
+              }
+            );
+          }
+        }
+      }
+    } catch (error) {
+      console.error('[REPLY ERROR] Error processing comment replies:', error);
+      
+      // Record the error for debugging
+      try {
+        await firestore.collection('notification_errors').add({
+          type: 'commentReply',
+          timestamp: admin.firestore.FieldValue.serverTimestamp(),
+          error: error.message,
+          stack: error.stack
+        });
+      } catch (logError) {
+        console.error('Failed to log error:', logError);
+      }
+    }
+  });
+};
+
+// Monitor for likes on comment replies
+const monitorCommentReplyLikes = () => {
+  const db = getDatabase();
+  const firestore = getFirestore();
+
+  console.log('Starting monitoring for likes on comment replies...');
+
+  // Listen for changes to notices that have comments with replies that have likes
+  db.ref('/community_notices').on('child_changed', async (snapshot) => {
+    try {
+      const noticeData = snapshot.val();
+      const noticeId = snapshot.key;
+
+      if (!noticeData || !noticeData.comments) {
+        return;
+      }
+
+      // Get all comments
+      const comments = noticeData.comments || {};
+      
+      // Process each comment to check for replies with likes
+      for (const commentId in comments) {
+        const comment = comments[commentId];
+        
+        // Skip comments with no replies
+        if (!comment.replies) {
+          continue;
+        }
+        
+        // Process each reply to check for likes
+        const replies = comment.replies || {};
+        
+        for (const replyId in replies) {
+          const reply = replies[replyId];
+          
+          // Skip replies with no likes
+          if (!reply.likes) {
+            continue;
+          }
+          
+          // Find likes added in the last 10 seconds
+          const now = Date.now();
+          const recentLikes = Object.entries(reply.likes)
+            .filter(([_, likeData]) => {
+              const createdAt = likeData.createdAt || 0;
+              return (now - createdAt) < 10000; // 10 seconds
+            })
+            .map(([userId, _]) => userId);
+            
+          if (recentLikes.length === 0) {
+            continue;
+          }
+          
+          console.log(`[REPLY_LIKE DEBUG] Recent likes detected on reply ${replyId} in comment ${commentId}, notice ${noticeId}: ${recentLikes.join(', ')}`);
+          
+          // Process each like separately
+          for (const likerId of recentLikes) {
+            // Don't send notification if the reply author and like author are the same
+            if (likerId === reply.authorId) {
+              console.log(`[REPLY_LIKE DEBUG] Skipping notification as user ${likerId} liked their own reply`);
+              continue;
+            }
+            
+            // Get liker's name for the notification
+            let displayName = 'Someone';
+            let likerIsAdmin = false;
+            let replyAuthorIsAdmin = false;
+            let commentAuthorIsAdmin = false;
+            let noticeAuthorIsAdmin = false;
+            
+            try {
+              // Try multiple sources to get the liker's name
+              // First check Realtime Database
+              const userSnapshot = await db.ref(`/users/${likerId}`).once('value');
+              const userData = userSnapshot.val();
+              
+              if (userData) {
+                displayName = userData.fullName || userData.displayName || userData.username || displayName;
+                likerIsAdmin = userData.isAdmin || userData.admin || false;
+              } else {
+                // If not in RTDB, check Firestore
+                const userDocRef = await firestore.collection('users').doc(likerId).get();
+                if (userDocRef.exists) {
+                  const userFirestoreData = userDocRef.data();
+                  displayName = userFirestoreData.fullName || userFirestoreData.displayName || userFirestoreData.username || displayName;
+                  likerIsAdmin = userFirestoreData.isAdmin || userFirestoreData.admin || false;
+                } else {
+                  // Final check in userProfiles collection
+                  const profileDocRef = await firestore.collection('userProfiles').doc(likerId).get();
+                  if (profileDocRef.exists) {
+                    const profileData = profileDocRef.data();
+                    displayName = profileData.fullName || profileData.displayName || profileData.name || displayName;
+                    likerIsAdmin = profileData.isAdmin || profileData.admin || false;
+                  }
+                }
+              }
+              
+              // Check if the reply author is an admin
+              const replyAuthorDocRef = await firestore.collection('users').doc(reply.authorId).get();
+              if (replyAuthorDocRef.exists) {
+                const replyAuthorData = replyAuthorDocRef.data();
+                replyAuthorIsAdmin = replyAuthorData.isAdmin || replyAuthorData.admin || false;
+              }
+              
+              // Check if the comment author is an admin
+              const commentAuthorDocRef = await firestore.collection('users').doc(comment.authorId).get();
+              if (commentAuthorDocRef.exists) {
+                const commentAuthorData = commentAuthorDocRef.data();
+                commentAuthorIsAdmin = commentAuthorData.isAdmin || commentAuthorData.admin || false;
+              }
+              
+              // Check if the notice author is an admin
+              const noticeAuthorDocRef = await firestore.collection('users').doc(noticeData.authorId).get();
+              if (noticeAuthorDocRef.exists) {
+                const noticeAuthorData = noticeAuthorDocRef.data();
+                noticeAuthorIsAdmin = noticeAuthorData.isAdmin || noticeAuthorData.admin || false;
+              }
+              
+              // If we STILL don't have a name, use first part of email or ID
+              if (displayName === 'Someone') {
+                // Try to get email from auth
+                try {
+                  const userRecord = await admin.auth().getUser(likerId);
+                  if (userRecord && userRecord.email) {
+                    displayName = userRecord.email.split('@')[0]; // Use email username
+                    console.log(`[REPLY_LIKE DEBUG] Using email from Auth: ${displayName}`);
+                  } else if (userRecord && userRecord.displayName) {
+                    displayName = userRecord.displayName;
+                    console.log(`[REPLY_LIKE DEBUG] Using displayName from Auth: ${displayName}`);
+                  }
+                } catch (authError) {
+                  console.log(`[REPLY_LIKE DEBUG] Auth lookup failed: ${authError.message}`);
+                  // If everything fails, use shortened user ID instead of the full one
+                  displayName = likerId.substring(0, 8) + '...';
+                }
+              }
+            } catch (error) {
+              console.error(`[REPLY_LIKE ERROR] Error retrieving user data: ${error.message}`);
+              displayName = likerId.substring(0, 8) + '...'; // Shortened ID as fallback
+            }
+            
+            console.log(`[REPLY_LIKE DEBUG] Final display name for ${likerId}: ${displayName}`);
+            
+            // Get reply text for the notification
+            let replyText = reply.text || reply.content || '';
+            if (replyText.length > 30) {
+              replyText = replyText.substring(0, 30) + '...';
+            }
+            
+            // If reply text is empty or undefined, use a default message
+            if (!replyText || replyText.trim() === '') {
+              replyText = '(No reply text)';
+            }
+            
+            console.log(`[REPLY_LIKE DEBUG] Sending notification to ${reply.authorId} about like from ${displayName} on reply: "${replyText}"`);
+            
+            // Send notification to the reply author with enhanced data
+            const { sendNotificationToUser } = require('./notifications');
+            await sendNotificationToUser(
+              reply.authorId,
+              'New Like on Your Reply',
+              `${displayName} liked your reply: "${replyText}"`,
+              {
+                type: 'socialInteractions',
+                noticeId,
+                commentId,
+                replyId,
+                communityId: noticeData.communityId,
+                likerId: likerId,
+                replyText: replyText,
+                // Include author IDs to help with filtering
+                replyAuthorId: reply.authorId,
+                commentAuthorId: comment.authorId,
+                noticeAuthorId: noticeData.authorId,
+                // Add admin status information
+                likerIsAdmin: likerIsAdmin ? 'true' : 'false',
+                replyAuthorIsAdmin: replyAuthorIsAdmin ? 'true' : 'false',
+                commentAuthorIsAdmin: commentAuthorIsAdmin ? 'true' : 'false',
+                noticeAuthorIsAdmin: noticeAuthorIsAdmin ? 'true' : 'false',
+                isUserAdmin: replyAuthorIsAdmin ? 'true' : 'false' // Flag if recipient is admin
+              }
+            );
+          }
+        }
+      }
+    } catch (error) {
+      console.error('[REPLY_LIKE ERROR] Error processing reply likes:', error);
+    }
+  });
+};
+
 // Start all monitoring functions
 const startAllMonitoring = () => {
   try {
@@ -1006,6 +1485,8 @@ const startAllMonitoring = () => {
     monitorVolunteerPosts();
     monitorVolunteerPostJoins();
     monitorCommentLikes();
+    monitorCommentReplies();
+    monitorCommentReplyLikes();
 
     console.log('All monitoring services started successfully');
   } catch (error) {
@@ -1024,5 +1505,7 @@ module.exports = {
   monitorVolunteerPosts,
   monitorVolunteerPostJoins,
   monitorCommentLikes,
+  monitorCommentReplies,
+  monitorCommentReplyLikes,
   startAllMonitoring
 };

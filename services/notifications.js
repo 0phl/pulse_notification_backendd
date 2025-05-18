@@ -48,9 +48,12 @@ async function createUserNotificationRecord(db, userId, notificationId, communit
 // Send a notification to a specific user
 const sendNotificationToUser = async (userId, title, body, data = {}) => {
   try {
-    console.log(`[NOTIFICATION DEBUG] Starting sendNotificationToUser for userId: ${userId}`);
-    console.log(`[NOTIFICATION DEBUG] Title: "${title}", Body: "${body}"`);
-    console.log(`[NOTIFICATION DEBUG] Data payload:`, JSON.stringify(data));
+    // Generate a unique request ID for this notification
+    const requestId = `req_${Date.now()}_${Math.random().toString(36).substring(2, 10)}`;
+    
+    console.log(`[NOTIFICATION DEBUG] [${requestId}] Starting sendNotificationToUser for userId: ${userId}`);
+    console.log(`[NOTIFICATION DEBUG] [${requestId}] Title: "${title}", Body: "${body}"`);
+    console.log(`[NOTIFICATION DEBUG] [${requestId}] Data payload:`, JSON.stringify(data));
     
     const db = getFirestore();
     const messaging = getMessaging();
@@ -59,7 +62,7 @@ const sendNotificationToUser = async (userId, title, body, data = {}) => {
     const userTokensDoc = await db.collection('user_tokens').doc(userId).get();
 
     if (!userTokensDoc.exists) {
-      console.log(`[NOTIFICATION ERROR] No tokens found for user ${userId}`);
+      console.log(`[NOTIFICATION ERROR] [${requestId}] No tokens found for user ${userId}`);
       // Track this user for token recovery in a separate collection
       await db.collection('missing_tokens').doc(userId).set({
         userId,
@@ -67,15 +70,15 @@ const sendNotificationToUser = async (userId, title, body, data = {}) => {
         notificationType: data.type || 'general',
         firstDetected: admin.firestore.FieldValue.serverTimestamp()
       }, { merge: true });
-      return { success: false, error: 'No tokens found' };
+      return { success: false, error: 'No tokens found', requestId };
     }
 
     const userData = userTokensDoc.data();
     const tokens = userData.tokens || [];
     const preferences = userData.notificationPreferences || {};
     
-    console.log(`[NOTIFICATION DEBUG] Found ${tokens.length} tokens for user ${userId}`);
-    console.log(`[NOTIFICATION DEBUG] User preferences:`, JSON.stringify(preferences));
+    console.log(`[NOTIFICATION DEBUG] [${requestId}] Found ${tokens.length} tokens for user ${userId}`);
+    console.log(`[NOTIFICATION DEBUG] [${requestId}] User preferences:`, JSON.stringify(preferences));
 
     // Check if user is an admin (for better notification handling)
     let isUserAdmin = false;
@@ -88,10 +91,10 @@ const sendNotificationToUser = async (userId, title, body, data = {}) => {
       // Add isUserAdmin to data for better notification handling
       data.isUserAdmin = isUserAdmin ? 'true' : 'false';
       if (isUserAdmin) {
-        console.log(`[NOTIFICATION DEBUG] User ${userId} is an admin, using admin notification settings`);
+        console.log(`[NOTIFICATION DEBUG] [${requestId}] User ${userId} is an admin, using admin notification settings`);
       }
     } catch (error) {
-      console.error(`[NOTIFICATION ERROR] Error checking admin status: ${error.message}`);
+      console.error(`[NOTIFICATION ERROR] [${requestId}] Error checking admin status: ${error.message}`);
     }
 
     // Check if any tokens are from logged out sessions
@@ -100,13 +103,19 @@ const sendNotificationToUser = async (userId, title, body, data = {}) => {
     const validTokens = tokens.filter(tokenData => {
       // If the token has an explicit loggedOut flag, skip it
       if (tokenData.loggedOut === true) {
-        console.log(`[NOTIFICATION DEBUG] Skipping explicitly logged out token for user ${userId}`);
+        console.log(`[NOTIFICATION DEBUG] [${requestId}] Skipping explicitly logged out token for user ${userId}`);
         return false;
+      }
+      
+      // MODIFIED: Always include tokens for admin users
+      if (isUserAdmin) {
+        console.log(`[NOTIFICATION DEBUG] [${requestId}] Including token for admin user ${userId} regardless of timestamp`);
+        return true;
       }
       
       // Always include tokens without a lastActive timestamp (legacy tokens)
       if (!tokenData.lastActive) {
-        console.log(`[NOTIFICATION DEBUG] Including legacy token without timestamp for user ${userId}`);
+        console.log(`[NOTIFICATION DEBUG] [${requestId}] Including legacy token without timestamp for user ${userId}`);
         return true;
       }
       
@@ -115,20 +124,20 @@ const sendNotificationToUser = async (userId, title, body, data = {}) => {
         tokenData.lastActive.toMillis() : 
         (tokenData.lastActive._seconds ? tokenData.lastActive._seconds * 1000 : 0);
       
-      console.log(`[NOTIFICATION DEBUG] Token timestamp check: now=${now}, lastActive=${lastActiveMs}, diff=${now - lastActiveMs} ms`);
+      console.log(`[NOTIFICATION DEBUG] [${requestId}] Token timestamp check: now=${now}, lastActive=${lastActiveMs}, diff=${now - lastActiveMs} ms`);
       
       // Handle future timestamps (system clock issues) by treating them as active
       if (lastActiveMs > now) {
-        console.log(`[NOTIFICATION DEBUG] Token has future timestamp for user ${userId}, treating as active: ${new Date(lastActiveMs).toISOString()}`);
+        console.log(`[NOTIFICATION DEBUG] [${requestId}] Token has future timestamp for user ${userId}, treating as active: ${new Date(lastActiveMs).toISOString()}`);
         return true;
       }
       
-      // IMPROVED: Increased token lifetime from 30 days to 60 days for better coverage
-      const sixtyDaysMs = 60 * 24 * 60 * 60 * 1000; // 60 days in milliseconds
-      const isRecentlyActive = (now - lastActiveMs) < sixtyDaysMs;
+      // MODIFIED: Significantly increased token lifetime from 60 days to 365 days for better reliability
+      const yearInMs = 365 * 24 * 60 * 60 * 1000; // 365 days in milliseconds
+      const isRecentlyActive = (now - lastActiveMs) < yearInMs;
       
       if (!isRecentlyActive) {
-        console.log(`[NOTIFICATION DEBUG] Skipping inactive token for user ${userId}, last active: ${new Date(lastActiveMs).toISOString()}`);
+        console.log(`[NOTIFICATION DEBUG] [${requestId}] Skipping very old token for user ${userId}, last active: ${new Date(lastActiveMs).toISOString()}`);
       }
       
       return isRecentlyActive;
@@ -137,33 +146,40 @@ const sendNotificationToUser = async (userId, title, body, data = {}) => {
     // IMPROVED: More intentional fallback strategy
     // If no tokens are valid after filtering, use only the most recent token as a fallback
     if (validTokens.length === 0 && tokens.length > 0) {
-      console.log(`[NOTIFICATION WARNING] No valid tokens found for user ${userId} after filtering, using most recent token as fallback`);
+      console.log(`[NOTIFICATION WARNING] [${requestId}] No valid tokens found for user ${userId} after filtering, using most recent token as fallback`);
       
-      // Find most recent token by lastActive timestamp
-      let mostRecentToken = tokens[0];
-      let mostRecentTimestamp = 0;
-      
-      tokens.forEach(tokenData => {
-        if (tokenData.lastActive) {
-          const lastActiveMs = tokenData.lastActive.toMillis ? 
-            tokenData.lastActive.toMillis() : 
-            (tokenData.lastActive._seconds ? tokenData.lastActive._seconds * 1000 : 0);
-          
-          if (lastActiveMs > mostRecentTimestamp) {
-            mostRecentTimestamp = lastActiveMs;
-            mostRecentToken = tokenData;
+      // MODIFIED: For admin users, just use the first available token without complex filtering
+      if (isUserAdmin) {
+        console.log(`[NOTIFICATION DEBUG] [${requestId}] Admin user ${userId}: using available token as fallback without complex filtering`);
+        validTokens.push(tokens[0]);
+      } else {
+        // Find most recent token by lastActive timestamp
+        let mostRecentToken = tokens[0];
+        let mostRecentTimestamp = 0;
+        
+        tokens.forEach(tokenData => {
+          if (tokenData.lastActive) {
+            const lastActiveMs = tokenData.lastActive.toMillis ? 
+              tokenData.lastActive.toMillis() : 
+              (tokenData.lastActive._seconds ? tokenData.lastActive._seconds * 1000 : 0);
+            
+            if (lastActiveMs > mostRecentTimestamp) {
+              mostRecentTimestamp = lastActiveMs;
+              mostRecentToken = tokenData;
+            }
           }
-        }
-      });
-      
-      validTokens.push(mostRecentToken);
-      console.log(`[NOTIFICATION DEBUG] Using most recent token from ${new Date(mostRecentTimestamp).toISOString()}`);
+        });
+        
+        validTokens.push(mostRecentToken);
+        console.log(`[NOTIFICATION DEBUG] [${requestId}] Using most recent token from ${new Date(mostRecentTimestamp).toISOString()}`);
+      }
       
       // Record this token recovery attempt
       try {
         await db.collection('token_recovery_attempts').add({
           userId,
-          tokenUsed: mostRecentToken.token ? mostRecentToken.token.substring(0, 15) + '...' : 'unknown format',
+          isAdmin: isUserAdmin ? true : false,
+          tokenUsed: validTokens[0].token ? validTokens[0].token.substring(0, 15) + '...' : 'unknown format',
           timestamp: admin.firestore.FieldValue.serverTimestamp(),
           notificationType: data.type || 'general'
         });
@@ -174,7 +190,7 @@ const sendNotificationToUser = async (userId, title, body, data = {}) => {
     
     // If there are still no valid tokens (empty tokens array), return error
     if (validTokens.length === 0) {
-      console.log(`[NOTIFICATION ERROR] No tokens found for user ${userId}`);
+      console.log(`[NOTIFICATION ERROR] [${requestId}] No tokens found for user ${userId}`);
       // Track this user for token recovery in a separate collection
       await db.collection('missing_tokens').doc(userId).set({
         userId,
@@ -182,19 +198,19 @@ const sendNotificationToUser = async (userId, title, body, data = {}) => {
         notificationType: data.type || 'general',
         firstDetected: admin.firestore.FieldValue.serverTimestamp()
       }, { merge: true });
-      return { success: false, error: 'No tokens found' };
+      return { success: false, error: 'No tokens found', requestId };
     }
     
     // Replace the original tokens array with our filtered one
     tokens.length = 0;
     tokens.push(...validTokens);
     
-    console.log(`[NOTIFICATION DEBUG] After filtering inactive tokens: ${tokens.length} remaining for user ${userId}`);
+    console.log(`[NOTIFICATION DEBUG] [${requestId}] After filtering inactive tokens: ${tokens.length} remaining for user ${userId}`);
 
     // Check if user has enabled this notification type
     if (data.type && preferences[data.type] === false) {
-      console.log(`[NOTIFICATION ERROR] User ${userId} has disabled ${data.type} notifications`);
-      return { success: false, error: 'Notification type disabled by user' };
+      console.log(`[NOTIFICATION ERROR] [${requestId}] User ${userId} has disabled ${data.type} notifications`);
+      return { success: false, error: 'Notification type disabled by user', requestId };
     }
 
     // For social interactions, we check if the user who performed the action (likerId/commenterId) 
@@ -202,25 +218,25 @@ const sendNotificationToUser = async (userId, title, body, data = {}) => {
     if (data.type === 'socialInteractions') {
       // For likes, check if likerId matches userId
       if (data.likerId && data.likerId === userId) {
-        console.log(`[NOTIFICATION ERROR] Prevented self-notification for user ${userId} (own action - like)`);
-        return { success: false, error: 'Self-notification prevented' };
+        console.log(`[NOTIFICATION ERROR] [${requestId}] Prevented self-notification for user ${userId} (own action - like)`);
+        return { success: false, error: 'Self-notification prevented', requestId };
       }
       
       // For comments, check if commenterId matches userId
       if (data.commenterId && data.commenterId === userId) {
-        console.log(`[NOTIFICATION ERROR] Prevented self-notification for user ${userId} (own action - comment)`);
-        return { success: false, error: 'Self-notification prevented' };
+        console.log(`[NOTIFICATION ERROR] [${requestId}] Prevented self-notification for user ${userId} (own action - comment)`);
+        return { success: false, error: 'Self-notification prevented', requestId };
       }
     } 
     // For other notification types, use the original check if needed
     // MODIFIED: Allow admins to receive their own community notice notifications
     else if (data.type !== 'socialInteractions' && data.type !== 'communityNotices' && data.authorId && data.authorId === userId) {
-      console.log(`[NOTIFICATION ERROR] Prevented self-notification for user ${userId} (own content)`);
-      return { success: false, error: 'Self-notification prevented' };
+      console.log(`[NOTIFICATION ERROR] [${requestId}] Prevented self-notification for user ${userId} (own content)`);
+      return { success: false, error: 'Self-notification prevented', requestId };
     }
 
     // IMPROVED: More reliable token extraction
-    console.log(`[NOTIFICATION DEBUG] Analyzing tokens for user ${userId}`);
+    console.log(`[NOTIFICATION DEBUG] [${requestId}] Analyzing tokens for user ${userId}`);
     
     // First, standardize all tokens to a consistent format
     const standardizedTokens = tokens.map(tokenData => {
@@ -237,164 +253,71 @@ const sendNotificationToUser = async (userId, title, body, data = {}) => {
         if (tokenData.token) {
           return {
             token: tokenData.token,
-            platform: tokenData.platform || 'unknown',
+            platform: tokenData.platform || tokenData.deviceType || 'unknown',
             lastActive: tokenData.lastActive || null,
-            loggedOut: tokenData.loggedOut || false,
             standardized: true
           };
         }
       }
-      return null;
-    }).filter(t => t !== null);
+      return null; // Invalid token
+    }).filter(token => token !== null);
     
-    console.log(`[NOTIFICATION DEBUG] Standardized ${standardizedTokens.length} tokens for user ${userId}`);
+    console.log(`[NOTIFICATION DEBUG] [${requestId}] Standardized ${standardizedTokens.length} tokens for user ${userId}`);
     
-    // Filter out explicitly logged out tokens
-    const loggedInTokens = standardizedTokens.filter(t => t.loggedOut !== true);
-    
-    if (loggedInTokens.length < standardizedTokens.length) {
-      console.log(`[NOTIFICATION DEBUG] Filtered out ${standardizedTokens.length - loggedInTokens.length} logged out tokens`);
-    }
-    
-    // Extract tokens as simple strings for FCM
-    const extractedTokens = loggedInTokens.map(t => t.token);
-    
-    // If this is a community notice, we need to prevent multiple notifications to the same device
-    // Check if other users might be sharing the same device and filter out those tokens
-    if (data.type === 'communityNotices' && data.authorId) {
-      try {
-        // Only filter tokens if the author is not an admin or if the author is different from the recipient
-        // This allows admins to receive notifications for their own community notices
-        if (!isUserAdmin && userId !== data.authorId) {
-          // Get the author's tokens to avoid sending notifications to devices they're logged into
-          const authorTokensDoc = await db.collection('user_tokens').doc(data.authorId).get();
-          if (authorTokensDoc.exists) {
-            const authorData = authorTokensDoc.data();
-            const authorTokens = authorData.tokens || [];
-            
-            // Extract author tokens in a reliable way
-            const authorTokenValues = authorTokens.map(t => {
-              if (typeof t === 'string') return t;
-              return t && t.token ? t.token : null;
-            }).filter(t => t !== null);
-            
-            // Create a set for faster lookups
-            const authorTokenSet = new Set(authorTokenValues);
-            
-            // Filter out tokens that match the author's devices
-            const uniqueTokens = extractedTokens.filter(token => !authorTokenSet.has(token));
-            
-            if (uniqueTokens.length !== extractedTokens.length) {
-              console.log(`[NOTIFICATION DEBUG] Filtered out ${extractedTokens.length - uniqueTokens.length} tokens that matched author's devices`);
-              // Replace our extracted tokens with the filtered list
-              extractedTokens.length = 0;
-              extractedTokens.push(...uniqueTokens);
-            }
-          }
-        } else {
-          console.log(`[NOTIFICATION DEBUG] Skipping token filtering for admin author or self-notification`);
-        }
-      } catch (error) {
-        console.error('[NOTIFICATION ERROR] Error checking author tokens:', error);
-        // Continue with the tokens we have, as this is just an optimization
-      }
-    }
-    
-    // Update tokens array with extracted tokens
-    tokens.length = 0;
-    tokens.push(...extractedTokens);
-
-    if (tokens.length === 0) {
-      console.log(`[NOTIFICATION ERROR] No valid tokens found for user ${userId} after filtering`);
-      return { success: false, error: 'No valid tokens found after filtering' };
-    }
-    
-    console.log(`[NOTIFICATION DEBUG] Valid tokens count after filtering: ${tokens.length}`);
-    if (tokens.length > 0) {
-      try {
-        // Safely log the token by checking its structure
-        const firstToken = tokens[0];
-        const tokenValue = typeof firstToken === 'string' ? firstToken : 
-                           (firstToken && firstToken.token ? firstToken.token : 'unknown-token-format');
-        console.log(`[NOTIFICATION DEBUG] First token (truncated): ${tokenValue.substring(0, 15)}...`);
-      } catch (err) {
-        console.error(`[NOTIFICATION DEBUG] Error logging token: ${err.message}`, tokens[0]);
-      }
-    }
-
-    // Convert all data values to strings and ensure no undefined values
-    const stringifiedData = {};
-    Object.keys(data).forEach(key => {
-      if (data[key] !== undefined && data[key] !== null) {
-        stringifiedData[key] = String(data[key]);
-      }
-    });
-
-    // Add timestamp to ensure uniqueness
-    stringifiedData.timestamp = String(Date.now());
-    stringifiedData.click_action = 'FLUTTER_NOTIFICATION_CLICK';
-    
-    console.log(`[NOTIFICATION DEBUG] Prepared stringified data:`, JSON.stringify(stringifiedData));
-
-    // Store the notification in Firestore first
-    let notificationId;
-    try {
-      // Create a single notification record
-      const notificationRef = await db.collection('user_notifications').add({
-        title,
-        body,
-        type: data.type || 'general',
-        data: stringifiedData,
-        createdAt: admin.firestore.FieldValue.serverTimestamp(),
-        createdBy: 'system',
-      });
-      notificationId = notificationRef.id;
-
-      // Create a status record for this user
-      await db.collection('notification_status').add({
-        userId,
-        notificationId,
-        read: false,
-        createdAt: admin.firestore.FieldValue.serverTimestamp(),
-      });
-
-      stringifiedData.notificationId = notificationId; // Add to data payload
-      console.log(`[NOTIFICATION DEBUG] Notification stored in Firestore for user ${userId} with ID: ${notificationId}`);
-    } catch (firestoreError) {
-      console.error('[NOTIFICATION ERROR] Error storing notification in Firestore:', firestoreError);
-      // Generate a unique ID if Firestore fails
-      notificationId = `local_${Date.now()}_${Math.random().toString(36).substring(2, 15)}`;
-      stringifiedData.notificationId = notificationId; // Add to data payload
-      // Continue anyway - we still want to try sending the push notification
-    }
-
-    // Send notifications one by one instead of using multicast
-    // This is more reliable but slower
+    // Variables to track successful and failed deliveries and invalidated tokens
     let successCount = 0;
     let failureCount = 0;
     const failedTokens = [];
-
-    for (const tokenData of tokens) {
+    
+    // Create a deep copy of the data object to avoid reference issues between notifications
+    // This is crucial when multiple notifications are sent in quick succession
+    const originalData = JSON.parse(JSON.stringify(data || {}));
+    
+    // Add unique requestId to the notification data to ensure uniqueness
+    originalData.requestId = requestId;
+    
+    // First, stringify all data values
+    const stringifiedData = {};
+    // Clone and stringify all data fields to avoid reference issues
+    Object.keys(originalData).forEach(key => {
+      if (originalData[key] !== undefined && originalData[key] !== null) {
+        // Ensure every value is a string
+        stringifiedData[key] = typeof originalData[key] === 'string' 
+          ? originalData[key] 
+          : String(originalData[key]);
+      }
+    });
+    
+    console.log(`[NOTIFICATION DEBUG] [${requestId}] Sending notification to ${standardizedTokens.length} tokens for user ${userId}`);
+    
+    // Send to each token individually for better error tracking
+    for (const tokenData of standardizedTokens) {
+      // Clone messaging data for each token to prevent shared references
+      // CRITICAL FIX: Each token gets a fresh copy of notification data
+      const tokenSpecificData = JSON.parse(JSON.stringify(stringifiedData));
+      
+      // Extract token value
+      const token = tokenData.token;
+      
+      // Skip invalid tokens
+      if (!token) {
+        console.error(`[NOTIFICATION ERROR] [${requestId}] Invalid token format:`, JSON.stringify(tokenData));
+        continue;
+      }
+      
       try {
-        // Extract the token value properly based on its structure
-        const token = typeof tokenData === 'string' ? tokenData : 
-                     (tokenData && tokenData.token ? tokenData.token : null);
-        
-        // Skip if we couldn't get a valid token
-        if (!token) {
-          console.error(`[NOTIFICATION ERROR] Invalid token format:`, JSON.stringify(tokenData));
-          continue;
-        }
-        
-        console.log(`[NOTIFICATION DEBUG] Preparing message for token: ${token.substring(0, 15)}...`);
+        console.log(`[NOTIFICATION DEBUG] [${requestId}] Preparing message for token: ${token.substring(0, 15)}...`);
         
         // Check if user is an admin based on data in the notification
-        const isAdmin = data.isUserAdmin === 'true' || 
-                      (data.noticeAuthorId === userId && data.authorIsAdmin === 'true');
+        const isAdmin = tokenSpecificData.isUserAdmin === 'true' || 
+                      (tokenSpecificData.noticeAuthorId === userId && tokenSpecificData.authorIsAdmin === 'true');
         
         if (isAdmin) {
-          console.log(`[NOTIFICATION DEBUG] Preparing ADMIN notification with special handling for user: ${userId}`);
+          console.log(`[NOTIFICATION DEBUG] [${requestId}] Preparing ADMIN notification with special handling for user: ${userId}`);
         }
+        
+        // Create a unique tag for this specific notification to prevent overwriting
+        const uniqueNotificationTag = `${tokenSpecificData.type || 'notification'}_${requestId}_${Date.now()}`;
         
         // Create notification message for a single token with optimized delivery settings
         // Restructuring payload to match exactly what the Flutter app expects
@@ -404,16 +327,18 @@ const sendNotificationToUser = async (userId, title, body, data = {}) => {
             body,
           },
           data: {
-            ...stringifiedData,
+            ...tokenSpecificData,
             // Add required fields from frontend inspection
-            type: data.type || 'general',
-            priority: data.priority || 'high',
+            type: tokenSpecificData.type || 'general',
+            priority: tokenSpecificData.priority || 'high',
             isForAdmin: isAdmin ? 'true' : 'false',
             forceAlert: 'true',
             // Ensure notificationId is always sent
-            notificationId: stringifiedData.notificationId || `local_${Date.now()}`,
+            notificationId: tokenSpecificData.notificationId || `local_${Date.now()}`,
             // Add timestamp to ensure uniqueness
             timestamp: String(Date.now()),
+            // Add unique request ID to ensure each notification is distinct
+            requestId: requestId,
             click_action: 'FLUTTER_NOTIFICATION_CLICK'
           },
           token: token, // Send to a single token
@@ -429,8 +354,8 @@ const sendNotificationToUser = async (userId, title, body, data = {}) => {
               defaultVibrateTimings: true,
               visibility: 'public',
               sound: 'default', // Explicitly set sound
-              // Add a tag to make notifications not replace each other
-              tag: `${data.type || 'notification'}_${Date.now()}`,
+              // Add a tag with both type and timestamp to make notifications not replace each other
+              tag: uniqueNotificationTag,
             },
             directBootOk: true, // Allow delivery during direct boot mode
           },
@@ -448,18 +373,20 @@ const sendNotificationToUser = async (userId, title, body, data = {}) => {
                 'interruption-level': 'time-sensitive', // iOS 15+ priority
                 // Add alert category for admin
                 category: isAdmin ? 'ADMIN_NOTIFICATION' : 'USER_NOTIFICATION',
+                // Add unique identifier in the thread-id to prevent grouping of different notifications
+                'thread-id': uniqueNotificationTag,
               },
             },
           },
         };
         
-        console.log(`[NOTIFICATION DEBUG] Full message payload:`, JSON.stringify(message));
+        console.log(`[NOTIFICATION DEBUG] [${requestId}] Full message payload:`, JSON.stringify(message));
         
         // Send the notification to this token
         const response = await messaging.send(message);
         successCount++;
-        console.log(`[NOTIFICATION SUCCESS] Sent notification to token: ${token.substring(0, 15)}...`);
-        console.log(`[NOTIFICATION DEBUG] FCM response:`, response);
+        console.log(`[NOTIFICATION SUCCESS] [${requestId}] Sent notification to token: ${token.substring(0, 15)}...`);
+        console.log(`[NOTIFICATION DEBUG] [${requestId}] FCM response:`, response);
       } catch (tokenError) {
         // Check if this is a token-specific error that indicates the token is invalid
         const isTokenInvalid = 
@@ -470,15 +397,15 @@ const sendNotificationToUser = async (userId, title, body, data = {}) => {
           tokenError.message?.includes('not a valid FCM registration token');
         
         // Detailed logging for better troubleshooting
-        console.error(`[NOTIFICATION ERROR] Failed to send to token ${token.substring(0, 15)}...`);
-        console.error(`[NOTIFICATION ERROR] Error code: ${tokenError.code || 'unknown'}`);
-        console.error(`[NOTIFICATION ERROR] Error message: ${tokenError.message}`);
+        console.error(`[NOTIFICATION ERROR] [${requestId}] Failed to send to token ${token.substring(0, 15)}...`);
+        console.error(`[NOTIFICATION ERROR] [${requestId}] Error code: ${tokenError.code || 'unknown'}`);
+        console.error(`[NOTIFICATION ERROR] [${requestId}] Error message: ${tokenError.message}`);
         
         if (isTokenInvalid) {
-          console.error(`[NOTIFICATION ERROR] Token identified as invalid and will be removed`);
+          console.error(`[NOTIFICATION ERROR] [${requestId}] Token identified as invalid and will be removed`);
           failedTokens.push(token);
         } else {
-          console.error(`[NOTIFICATION ERROR] This may be a transient error, not removing token`);
+          console.error(`[NOTIFICATION ERROR] [${requestId}] This may be a transient error, not removing token`);
           // Count as a failure but don't mark token as invalid
         }
         
@@ -486,7 +413,7 @@ const sendNotificationToUser = async (userId, title, body, data = {}) => {
       }
     }
 
-    console.log(`[NOTIFICATION SUMMARY] Notification to ${userId}: ${successCount} successful, ${failureCount} failed`);
+    console.log(`[NOTIFICATION SUMMARY] [${requestId}] Notification to ${userId}: ${successCount} successful, ${failureCount} failed`);
 
     // Remove failed tokens
     if (failedTokens.length > 0) {
@@ -499,20 +426,21 @@ const sendNotificationToUser = async (userId, title, body, data = {}) => {
         await db.collection('user_tokens').doc(userId).update({
           tokens: updatedTokens,
         });
-        console.log(`Removed ${failedTokens.length} invalid tokens for user ${userId}`);
+        console.log(`[NOTIFICATION DEBUG] [${requestId}] Removed ${failedTokens.length} invalid tokens for user ${userId}`);
       } catch (updateError) {
-        console.error('[NOTIFICATION ERROR] Error updating tokens:', updateError);
+        console.error(`[NOTIFICATION ERROR] [${requestId}] Error updating tokens:`, updateError);
       }
     }
 
     return {
       success: successCount > 0,
       successCount,
-      failureCount
+      failureCount,
+      requestId
     };
   } catch (error) {
-    console.error('[NOTIFICATION ERROR] Error in sendNotificationToUser:', error);
-    return { success: false, error: error.message };
+    console.error(`[NOTIFICATION ERROR] [${requestId || 'unknown'}] Error in sendNotificationToUser:`, error);
+    return { success: false, error: error.message, requestId };
   }
 };
 
