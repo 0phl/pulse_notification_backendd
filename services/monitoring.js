@@ -56,7 +56,6 @@ const monitorCommunityNotices = () => {
             authorIsAdmin = authorData.isAdmin === true || authorData.role === 'admin';
             if (authorIsAdmin) {
               console.log(`[NOTICE DEBUG] Notice author ${noticeData.authorId} is an admin`);
-              // Don't exclude admins - they should get notifications like other users
             }
           }
         } catch (error) {
@@ -632,15 +631,21 @@ const monitorReportStatusUpdates = () => {
 // Monitor for new volunteer posts
 const monitorVolunteerPosts = () => {
   const firestore = getFirestore();
+  
+  // Store the server start time to filter out old posts
+  const serverStartTime = Date.now();
+  console.log(`[VOLUNTEER DEBUG] Server started at: ${new Date(serverStartTime).toISOString()}`);
 
   console.log('Starting monitoring for new volunteer posts...');
 
   // Listen for new volunteer posts
   firestore.collection('volunteer_posts')
-    .orderBy('createdAt', 'desc')
-    .limit(20) // Limit to recent posts
+    .orderBy('date', 'desc')
+    .limit(20)
     .onSnapshot(async (snapshot) => {
       try {
+        console.log('[VOLUNTEER DEBUG] Received volunteer posts snapshot');
+        
         // Process only added documents
         const addedDocs = snapshot.docChanges()
           .filter(change => change.type === 'added')
@@ -649,63 +654,112 @@ const monitorVolunteerPosts = () => {
             ...change.doc.data()
           }));
 
+        console.log(`[VOLUNTEER DEBUG] Found ${addedDocs.length} new volunteer posts`);
+
         if (addedDocs.length === 0) {
           return;
         }
 
         // Get current time
         const now = Date.now();
-        // Only process active posts created in the last 5 minutes
-        const recentPosts = addedDocs.filter(post => {
-          // Check if post has createdAt timestamp
-          if (!post.createdAt) return false;
+        
+        // Process all posts that have a valid date timestamp
+        const validPosts = addedDocs.filter(post => {
+          console.log(`[VOLUNTEER DEBUG] Processing post ${post.id}`);
+          console.log('[VOLUNTEER DEBUG] Full post data:', JSON.stringify(post, null, 2));
+          
+          // Check required fields - support both adminId and userId fields
+          const creatorId = post.adminId || post.userId;
+          if (!creatorId) {
+            console.log(`[VOLUNTEER DEBUG] Post ${post.id} missing creator ID (adminId/userId)`);
+            return false;
+          }
+          
+          if (!post.communityId) {
+            console.log(`[VOLUNTEER DEBUG] Post ${post.id} missing communityId`);
+            return false;
+          }
+
+          // Check if post has date timestamp
+          if (!post.date) {
+            console.log(`[VOLUNTEER DEBUG] Post ${post.id} missing date timestamp`);
+            return false;
+          }
 
           // Convert Firestore timestamp to milliseconds
-          const createdAtMs = post.createdAt.toMillis ?
-            post.createdAt.toMillis() :
-            (post.createdAt._seconds ? post.createdAt._seconds * 1000 : 0);
+          const createdAtMs = post.date.toMillis ?
+            post.date.toMillis() :
+            (post.date._seconds ? post.date._seconds * 1000 : 0);
 
-          // Check if post was created in the last 5 minutes
-          if ((now - createdAtMs) >= 5 * 60 * 1000) return false;
+          // Skip posts created before server start (prevents duplicate notifications on restart)
+          if (createdAtMs < serverStartTime) {
+            console.log(`[VOLUNTEER DEBUG] Skipping post ${post.id} - created before server start`);
+            return false;
+          }
 
-          // Check if the event date is in the future
+          // Only process posts created in the last 5 minutes
+          if (now - createdAtMs > 5 * 60 * 1000) {
+            console.log(`[VOLUNTEER DEBUG] Skipping post ${post.id} - too old (${Math.floor((now - createdAtMs)/1000)} seconds)`);
+            return false;
+          }
+
+          console.log(`[VOLUNTEER DEBUG] Post ${post.id} created at: ${new Date(createdAtMs).toISOString()}`);
+
+          // Check if the event date is valid and in the future
           if (post.eventDate) {
             const eventDateMs = post.eventDate.toMillis ?
               post.eventDate.toMillis() :
               (post.eventDate._seconds ? post.eventDate._seconds * 1000 : 0);
 
-            // Skip events that have already passed
-            if (eventDateMs < now) return false;
+            if (eventDateMs < now) {
+              console.log(`[VOLUNTEER DEBUG] Post ${post.id} has past event date: ${new Date(eventDateMs).toISOString()}`);
+              return false;
+            }
           }
 
+          console.log(`[VOLUNTEER DEBUG] Post ${post.id} passed all checks, will send notification`);
           return true;
         });
 
-        if (recentPosts.length === 0) {
+        console.log(`[VOLUNTEER DEBUG] ${validPosts.length} posts passed filtering out of ${addedDocs.length} total`);
+
+        if (validPosts.length === 0) {
           return;
         }
 
-        for (const post of recentPosts) {
-          console.log(`New volunteer post detected: ${post.id}`);
+        for (const post of validPosts) {
+          console.log(`[VOLUNTEER DEBUG] Preparing to send notification for post: ${post.id}`);
+          console.log(`[VOLUNTEER DEBUG] Community ID: ${post.communityId}`);
+          console.log(`[VOLUNTEER DEBUG] Post Creator: ${post.adminName || post.userName || 'Someone'}`);
+          console.log(`[VOLUNTEER DEBUG] Post Creator ID: ${post.adminId || post.userId}`);
 
           // Send notification to all users in the community except the creator
           const { sendNotificationToCommunity } = require('./notifications');
-          await sendNotificationToCommunity(
-            post.communityId,
-            'New Volunteer Opportunity',
-            `${post.userName || post.adminName || 'Someone'} posted: "${post.title}"`,
-            {
-              type: 'volunteer',
-              volunteerId: post.id, // Use volunteerId to match what the app expects
-              postId: post.id,      // Keep postId for backward compatibility
-              communityId: post.communityId,
-              userId: post.userId,
-            },
-            post.userId // Exclude the creator
-          );
+          try {
+            const result = await sendNotificationToCommunity(
+              post.communityId,
+              'New Volunteer Opportunity',
+              `${post.adminName || post.userName || 'Someone'} posted: "${post.title}"`,
+              {
+                type: 'volunteer',
+                volunteerId: post.id,
+                postId: post.id,
+                communityId: post.communityId,
+                userId: post.adminId || post.userId,
+                priority: 'high',
+                forceAlert: 'true',
+                timestamp: Date.now()
+              },
+              post.adminId || post.userId
+            );
+            
+            console.log(`[VOLUNTEER DEBUG] Notification result for post ${post.id}:`, result);
+          } catch (error) {
+            console.error(`[VOLUNTEER ERROR] Failed to send notification for post ${post.id}:`, error);
+          }
         }
       } catch (error) {
-        console.error('Error processing new volunteer posts:', error);
+        console.error('[VOLUNTEER ERROR] Error processing new volunteer posts:', error);
       }
     });
 };
@@ -713,74 +767,173 @@ const monitorVolunteerPosts = () => {
 // Monitor for users joining volunteer posts
 const monitorVolunteerPostJoins = () => {
   const firestore = getFirestore();
+  
+  // Store the server start time
+  const serverStartTime = Date.now();
+  console.log(`[VOLUNTEER JOIN DEBUG] Server started at: ${new Date(serverStartTime).toISOString()}`);
 
   console.log('Starting monitoring for users joining volunteer posts...');
+
+  // Keep track of processed joins to prevent duplicates
+  const processedJoins = new Set();
 
   // Listen for updates to volunteer posts
   firestore.collection('volunteer_posts')
     .onSnapshot(async (snapshot) => {
       try {
+        console.log('[VOLUNTEER JOIN DEBUG] Processing volunteer post changes');
+        
         // Process only modified documents
         const modifiedDocs = snapshot.docChanges()
-          .filter(change => change.type === 'modified')
-          .map(change => ({
-            id: change.doc.id,
-            ...change.doc.data(),
-            oldData: change.doc.metadata.hasPendingWrites ? null : change.doc.data()
-          }));
+          .filter(change => {
+            // Only process 'modified' changes that are not local
+            const isModified = change.type === 'modified';
+            const isLocal = change.doc.metadata?.hasPendingWrites ?? false;
+            console.log(`[VOLUNTEER JOIN DEBUG] Change type: ${change.type}, isLocal: ${isLocal}`);
+            return isModified && !isLocal;
+          })
+          .map(change => {
+            const newData = change.doc.data();
+            // Get the actual previous state from the change.oldDoc
+            const oldData = change.oldDoc ? change.oldDoc.data() : undefined;
+            
+            console.log('[VOLUNTEER JOIN DEBUG] Previous state:', oldData);
+            console.log('[VOLUNTEER JOIN DEBUG] New state:', newData);
+            
+            return {
+              id: change.doc.id,
+              ...newData,
+              oldData
+            };
+          });
+
+        console.log(`[VOLUNTEER JOIN DEBUG] Found ${modifiedDocs.length} modified volunteer posts`);
 
         if (modifiedDocs.length === 0) {
           return;
         }
 
         for (const post of modifiedDocs) {
-          // Skip if we don't have the old data (local change)
-          if (!post.oldData) {
+          console.log(`[VOLUNTEER JOIN DEBUG] Processing changes for post: ${post.id}`);
+          console.log(`[VOLUNTEER JOIN DEBUG] Post title: "${post.title}"`);
+          console.log(`[VOLUNTEER JOIN DEBUG] Post creator (adminId): ${post.adminId}`);
+          console.log(`[VOLUNTEER JOIN DEBUG] Full post data:`, JSON.stringify(post, null, 2));
+          console.log(`[VOLUNTEER JOIN DEBUG] Community ID: ${post.communityId}`);
+          
+          // Skip if we don't have the admin ID
+          if (!post.adminId) {
+            console.log(`[VOLUNTEER JOIN DEBUG] Warning: Post ${post.id} is missing adminId`);
             continue;
           }
 
           // Check if joinedUsers has changed
-          if (!post.joinedUsers || !post.oldData.joinedUsers ||
-              post.joinedUsers.length === post.oldData.joinedUsers.length) {
-            continue;
-          }
+          const currentJoinedUsers = Array.isArray(post.joinedUsers) ? post.joinedUsers : [];
+          const previousJoinedUsers = post.oldData && Array.isArray(post.oldData.joinedUsers) ? 
+            post.oldData.joinedUsers : [];
+          
+          console.log(`[VOLUNTEER JOIN DEBUG] Current joined users: [${currentJoinedUsers.join(', ')}]`);
+          console.log(`[VOLUNTEER JOIN DEBUG] Previous joined users: [${previousJoinedUsers.join(', ')}]`);
 
-          // Find the new users who joined
-          const newUsers = post.joinedUsers.filter(userId =>
-            !post.oldData.joinedUsers.includes(userId)
-          );
+          // Find the new users who joined by comparing arrays
+          const newUsers = currentJoinedUsers.filter(userId => !previousJoinedUsers.includes(userId));
+          
+          console.log(`[VOLUNTEER JOIN DEBUG] Detected new users: [${newUsers.join(', ')}]`);
 
           if (newUsers.length === 0) {
+            console.log(`[VOLUNTEER JOIN DEBUG] No new users detected for post ${post.id}`);
             continue;
           }
 
-          console.log(`New users joined volunteer post ${post.id}: ${newUsers.join(', ')}`);
+          console.log(`[VOLUNTEER JOIN DEBUG] ${newUsers.length} new users joined post ${post.id}: ${newUsers.join(', ')}`);
 
           // For each new user, send notification to the post creator
           for (const newUserId of newUsers) {
-            // Get new user's name
-            const userDoc = await firestore.collection('users').doc(newUserId).get();
-            const userData = userDoc.exists ? userDoc.data() : null;
-            const userName = userData?.fullName || userData?.username || 'Someone';
-
-            // Send notification to the post creator
-            const { sendNotificationToUser } = require('./notifications');
-            await sendNotificationToUser(
-              post.userId,
-              'New Volunteer Joined',
-              `${userName} joined your volunteer post: "${post.title}"`,
-              {
-                type: 'volunteer',
-                volunteerId: post.id, // Use volunteerId to match what the app expects
-                postId: post.id,      // Keep postId for backward compatibility
-                communityId: post.communityId,
-                joinerId: newUserId,
+            try {
+              // Create a unique key for this join to prevent duplicates
+              const joinKey = `${post.id}:${newUserId}`;
+              if (processedJoins.has(joinKey)) {
+                console.log(`[VOLUNTEER JOIN DEBUG] Skipping already processed join: ${joinKey}`);
+                continue;
               }
-            );
+
+              // Skip if the new user is the post creator
+              if (newUserId === post.adminId) {
+                console.log(`[VOLUNTEER JOIN DEBUG] Skipping notification for post creator ${newUserId}`);
+                continue;
+              }
+
+              // Get new user's name from Realtime Database first
+              const db = getDatabase();
+              let userName = 'Someone';
+              try {
+                const userSnapshot = await db.ref(`/users/${newUserId}`).once('value');
+                const userData = userSnapshot.val();
+                if (userData) {
+                  userName = userData.fullName || userData.displayName || userData.username || userName;
+                } else {
+                  // Fallback to Firestore if not found in RTDB
+                  const userDoc = await firestore.collection('users').doc(newUserId).get();
+                  if (userDoc.exists) {
+                    const firestoreData = userDoc.data();
+                    userName = firestoreData.fullName || firestoreData.displayName || firestoreData.username || userName;
+                  }
+                }
+              } catch (nameError) {
+                console.error(`[VOLUNTEER JOIN ERROR] Error getting user name: ${nameError}`);
+              }
+
+              console.log(`[VOLUNTEER JOIN DEBUG] Sending notification about user ${userName} (${newUserId}) to admin ${post.adminId}`);
+
+              // Send notification to the post creator (admin)
+              const { sendNotificationToUser } = require('./notifications');
+              await sendNotificationToUser(
+                post.adminId,
+                'New Volunteer Joined',
+                `${userName} joined your volunteer post: "${post.title}"`,
+                {
+                  type: 'volunteer',
+                  volunteerId: post.id,
+                  postId: post.id,
+                  communityId: post.communityId,
+                  joinerId: newUserId,
+                  priority: 'high',
+                  forceAlert: 'true',
+                  timestamp: Date.now()
+                }
+              );
+              
+              console.log(`[VOLUNTEER JOIN DEBUG] Successfully sent notification for post ${post.id} to admin ${post.adminId}`);
+
+              // Also send a confirmation notification to the joiner
+              await sendNotificationToUser(
+                newUserId,
+                'Joined Volunteer Post',
+                `You have successfully joined the volunteer post: "${post.title}"`,
+                {
+                  type: 'volunteer',
+                  volunteerId: post.id,
+                  postId: post.id,
+                  communityId: post.communityId,
+                  status: 'joined',
+                  priority: 'high',
+                  forceAlert: 'true',
+                  timestamp: Date.now()
+                }
+              );
+              
+              // Mark this join as processed
+              processedJoins.add(joinKey);
+              
+              console.log(`[VOLUNTEER JOIN DEBUG] Successfully sent confirmation notification to joiner ${newUserId}`);
+            } catch (userError) {
+              console.error(`[VOLUNTEER JOIN ERROR] Error processing user ${newUserId}:`, userError);
+              console.error(userError);
+            }
           }
         }
       } catch (error) {
-        console.error('Error processing volunteer post joins:', error);
+        console.error('[VOLUNTEER JOIN ERROR] Error processing volunteer post joins:', error);
+        console.error(error);
       }
     });
 };

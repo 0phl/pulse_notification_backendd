@@ -80,6 +80,43 @@ const sendNotificationToUser = async (userId, title, body, data = {}) => {
     console.log(`[NOTIFICATION DEBUG] [${requestId}] Found ${tokens.length} tokens for user ${userId}`);
     console.log(`[NOTIFICATION DEBUG] [${requestId}] User preferences:`, JSON.stringify(preferences));
 
+    // Check if user has enabled this notification type
+    if (data.type && preferences[data.type] === false) {
+      console.log(`[NOTIFICATION ERROR] [${requestId}] User ${userId} has disabled ${data.type} notifications`);
+      return { success: false, error: 'Notification type disabled by user', requestId };
+    }
+
+    // For social interactions, we check if the user who performed the action (likerId/commenterId) 
+    // is the same as the recipient (userId)
+    if (data.type === 'socialInteractions') {
+      // For likes, check if likerId matches userId
+      if (data.likerId && data.likerId === userId) {
+        console.log(`[NOTIFICATION ERROR] [${requestId}] Prevented self-notification for user ${userId} (own action - like)`);
+        return { success: false, error: 'Self-notification prevented', requestId };
+      }
+      
+      // For comments, check if commenterId matches userId
+      if (data.commenterId && data.commenterId === userId) {
+        console.log(`[NOTIFICATION ERROR] [${requestId}] Prevented self-notification for user ${userId} (own action - comment)`);
+        return { success: false, error: 'Self-notification prevented', requestId };
+      }
+    } 
+    // For other notification types, use the original check if needed
+    // MODIFIED: Allow admins to receive their own community notice and volunteer notifications
+    else if (data.type !== 'socialInteractions' && 
+             data.type !== 'communityNotices' && 
+             data.type !== 'volunteer' && 
+             data.authorId && data.authorId === userId) {
+      console.log(`[NOTIFICATION ERROR] [${requestId}] Prevented self-notification for user ${userId} (own content)`);
+      return { success: false, error: 'Self-notification prevented', requestId };
+    }
+
+    // Ensure notification type is set for volunteer posts
+    if (data.type === 'volunteer' && !data.volunteerId) {
+      console.log(`[NOTIFICATION DEBUG] [${requestId}] Adding volunteerId to volunteer notification`);
+      data.volunteerId = data.postId; // Ensure volunteerId is set if only postId is provided
+    }
+
     // Check if user is an admin (for better notification handling)
     let isUserAdmin = false;
     try {
@@ -229,8 +266,11 @@ const sendNotificationToUser = async (userId, title, body, data = {}) => {
       }
     } 
     // For other notification types, use the original check if needed
-    // MODIFIED: Allow admins to receive their own community notice notifications
-    else if (data.type !== 'socialInteractions' && data.type !== 'communityNotices' && data.authorId && data.authorId === userId) {
+    // MODIFIED: Allow admins to receive their own community notice and volunteer notifications
+    else if (data.type !== 'socialInteractions' && 
+             data.type !== 'communityNotices' && 
+             data.type !== 'volunteer' && 
+             data.authorId && data.authorId === userId) {
       console.log(`[NOTIFICATION ERROR] [${requestId}] Prevented self-notification for user ${userId} (own content)`);
       return { success: false, error: 'Self-notification prevented', requestId };
     }
