@@ -32,20 +32,20 @@ const monitorCommunityNotices = () => {
         console.log(`Skipping notice ${noticeId} - too old (${Math.floor((now - createdAt)/1000)} seconds)`);
         return;
       }
-      
+
       // For notices between 2 minutes and 1 hour old, log but still process them
       if (now - createdAt > 2 * 60 * 1000) {
         console.log(`Notice ${noticeId} is older than expected (${Math.floor((now - createdAt)/1000)} seconds), but still processing`);
       } else {
         console.log(`New community notice detected: ${noticeId}`);
       }
-      
+
       // Enhanced logging for better debugging
       console.log(`[NOTICE DEBUG] Notice created by user: ${noticeData.authorId || 'unknown'}`);
       console.log(`[NOTICE DEBUG] Notice title: "${noticeData.title || 'No title'}"`);
       console.log(`[NOTICE DEBUG] Notice community: ${noticeData.communityId}`);
       console.log(`[NOTICE DEBUG] Notice created at: ${new Date(createdAt).toISOString()}`);
-      
+
       // Check if author is admin and store the status
       let authorIsAdmin = false;
       if (noticeData.authorId) {
@@ -78,17 +78,17 @@ const monitorCommunityNotices = () => {
 
       // Send notification to all users in the community except the author
       const { sendNotificationToCommunity } = require('./notifications');
-      
+
       // Make sure to pass the authorId to exclude from notifications
       if (!noticeData.authorId) {
         console.log(`[NOTICE WARNING] No author ID found for notice ${noticeId}. Notifications might be sent to the author.`);
       }
-      
+
       // IMPROVED: Add retry logic for failed notification attempts
       let retryCount = 0;
       const maxRetries = 3;
       let notificationResult;
-      
+
       while (retryCount < maxRetries) {
         try {
           notificationResult = await sendNotificationToCommunity(
@@ -104,12 +104,12 @@ const monitorCommunityNotices = () => {
             },
             noticeData.authorId // Exclude the author
           );
-          
+
           // If successful or partially successful, break out of retry loop
           if (notificationResult.success || notificationResult.sentCount > 0) {
             break;
           }
-          
+
           retryCount++;
           console.log(`[NOTICE RETRY] Attempt ${retryCount}/${maxRetries} failed, retrying in 3 seconds...`);
           await new Promise(resolve => setTimeout(resolve, 3000)); // Wait 3 seconds before retry
@@ -119,7 +119,7 @@ const monitorCommunityNotices = () => {
           await new Promise(resolve => setTimeout(resolve, 3000)); // Wait 3 seconds before retry
         }
       }
-      
+
       // Log outcome of notification attempt after retries
       if (retryCount === maxRetries) {
         console.error(`[NOTICE ERROR] Failed to send notification for notice ${noticeId} after ${maxRetries} attempts`);
@@ -136,7 +136,7 @@ const monitorCommunityNotices = () => {
       } else if (notificationResult && notificationResult.sentCount > 0) {
         console.log(`[NOTICE SUCCESS] Notification sent for notice ${noticeId} to ${notificationResult.sentCount} users after ${retryCount} retries`);
       }
-      
+
     } catch (error) {
       console.error('Error processing new community notice:', error);
       // Record the error for debugging
@@ -186,7 +186,7 @@ const monitorCommunityNoticeComments = () => {
       }
 
       const latestComment = commentsArray[0];
-      
+
       // DEBUG LOGGING: Log the entire comment object to diagnose issues
       console.log(`[COMMENT DEBUG] Latest comment on notice ${noticeId}:`, JSON.stringify(latestComment));
 
@@ -208,25 +208,25 @@ const monitorCommunityNoticeComments = () => {
 
       // Make sure text exists and is a string before using substring
       let commentText = latestComment.text || '';
-      
+
       // Handle the case where text might be in a different property
       if (!commentText && latestComment.content) {
         commentText = latestComment.content;
         console.log(`[COMMENT DEBUG] Using 'content' property instead of 'text' for comment ${latestComment.id}`);
       }
-      
+
       // Check if comment text is empty
       if (!commentText || commentText.trim() === '') {
         console.log(`[COMMENT DEBUG] WARNING: Empty comment text for comment ${latestComment.id}`);
         commentText = "(No comment text)";
       }
-      
+
       // Ensure string type
       commentText = String(commentText);
-      
+
       // Truncate long comments
       const truncatedText = `"${commentText.substring(0, 50)}${commentText.length > 50 ? '...' : ''}"`;
-      
+
       console.log(`[COMMENT DEBUG] Sending notification with comment text: ${truncatedText}`);
 
       await sendNotificationToUser(
@@ -267,7 +267,7 @@ const monitorCommunityNoticeLikes = () => {
 
       // Get all likes
       const likes = noticeData.likes || {};
-      
+
       // Find likes added in the last 10 seconds
       const now = Date.now();
       const recentLikes = Object.entries(likes)
@@ -288,15 +288,15 @@ const monitorCommunityNoticeLikes = () => {
       // Define authorIsAdmin and likerIsAdmin variables at a wider scope
       let authorIsAdmin = false;
       let likerIsAdmin = false;
-      
+
       try {
         const authorDocRef = await firestore.collection('users').doc(noticeData.authorId).get();
         authorIsAdmin = authorDocRef.exists && (authorDocRef.data().isAdmin || authorDocRef.data().role === 'admin');
-        
+
         if (authorIsAdmin) {
           console.log(`[NOTICE_LIKE DEBUG] Notice author ${noticeData.authorId} is an admin`);
         }
-        
+
         // We'll set likerIsAdmin for the current liker inside the loop below
       } catch (error) {
         console.error(`[NOTICE_LIKE ERROR] Error checking author admin status: ${error.message}`);
@@ -317,7 +317,7 @@ const monitorCommunityNoticeLikes = () => {
         try {
           const likerDocRef = await firestore.collection('users').doc(likerId).get();
           likerIsAdmin = likerDocRef.exists && (likerDocRef.data().isAdmin || likerDocRef.data().role === 'admin');
-          
+
           if (likerIsAdmin) {
             console.log(`[NOTICE_LIKE DEBUG] Liker ${likerId} is an admin`);
           }
@@ -325,22 +325,22 @@ const monitorCommunityNoticeLikes = () => {
           console.error(`[NOTICE_LIKE ERROR] Error checking liker admin status: ${error.message}`);
           likerIsAdmin = false; // Reset in case of error
         }
-        
+
         // Get liker's name with enhanced retrieval - check multiple data sources
         let displayName = 'Someone';
-        
+
         try {
           // First try Realtime Database
           const likerSnapshot = await db.ref(`/users/${likerId}`).once('value');
           const likerData = likerSnapshot.val();
-          
+
           if (likerData) {
             console.log(`[NOTICE_LIKE DEBUG] Found user in RTDB: ${likerId}`);
             displayName = likerData.fullName || likerData.displayName || likerData.username || displayName;
           } else {
             console.log(`[NOTICE_LIKE DEBUG] User not found in RTDB: ${likerId}`);
           }
-          
+
           // If we still don't have a name, check Firestore
           if (displayName === 'Someone') {
             const userDocRef = await firestore.collection('users').doc(likerId).get();
@@ -352,7 +352,7 @@ const monitorCommunityNoticeLikes = () => {
               console.log(`[NOTICE_LIKE DEBUG] User not found in Firestore: ${likerId}`);
             }
           }
-          
+
           // Final check in userProfiles collection if it exists
           if (displayName === 'Someone') {
             const profileDocRef = await firestore.collection('userProfiles').doc(likerId).get();
@@ -362,7 +362,7 @@ const monitorCommunityNoticeLikes = () => {
               displayName = profileData.fullName || profileData.displayName || profileData.name || displayName;
             }
           }
-          
+
           // If we STILL don't have a name, use first part of email or ID
           if (displayName === 'Someone') {
             // Try to get email from auth
@@ -385,12 +385,12 @@ const monitorCommunityNoticeLikes = () => {
           console.error(`[NOTICE_LIKE ERROR] Error retrieving user data: ${error.message}`);
           displayName = likerId.substring(0, 8) + '...'; // Shortened ID as fallback
         }
-        
+
         console.log(`[NOTICE_LIKE DEBUG] Final display name for ${likerId}: ${displayName}`);
 
         // Prepare notice title
         const noticeTitle = noticeData.title || 'your notice';
-        
+
         // Send notification to the notice author with admin flags
         const { sendNotificationToUser } = require('./notifications');
         await sendNotificationToUser(
@@ -631,7 +631,7 @@ const monitorReportStatusUpdates = () => {
 // Monitor for new volunteer posts
 const monitorVolunteerPosts = () => {
   const firestore = getFirestore();
-  
+
   // Store the server start time to filter out old posts
   const serverStartTime = Date.now();
   console.log(`[VOLUNTEER DEBUG] Server started at: ${new Date(serverStartTime).toISOString()}`);
@@ -645,7 +645,7 @@ const monitorVolunteerPosts = () => {
     .onSnapshot(async (snapshot) => {
       try {
         console.log('[VOLUNTEER DEBUG] Received volunteer posts snapshot');
-        
+
         // Process only added documents
         const addedDocs = snapshot.docChanges()
           .filter(change => change.type === 'added')
@@ -662,19 +662,19 @@ const monitorVolunteerPosts = () => {
 
         // Get current time
         const now = Date.now();
-        
+
         // Process all posts that have a valid date timestamp
         const validPosts = addedDocs.filter(post => {
           console.log(`[VOLUNTEER DEBUG] Processing post ${post.id}`);
           console.log('[VOLUNTEER DEBUG] Full post data:', JSON.stringify(post, null, 2));
-          
+
           // Check required fields - support both adminId and userId fields
           const creatorId = post.adminId || post.userId;
           if (!creatorId) {
             console.log(`[VOLUNTEER DEBUG] Post ${post.id} missing creator ID (adminId/userId)`);
             return false;
           }
-          
+
           if (!post.communityId) {
             console.log(`[VOLUNTEER DEBUG] Post ${post.id} missing communityId`);
             return false;
@@ -752,7 +752,7 @@ const monitorVolunteerPosts = () => {
               },
               post.adminId || post.userId
             );
-            
+
             console.log(`[VOLUNTEER DEBUG] Notification result for post ${post.id}:`, result);
           } catch (error) {
             console.error(`[VOLUNTEER ERROR] Failed to send notification for post ${post.id}:`, error);
@@ -764,115 +764,208 @@ const monitorVolunteerPosts = () => {
     });
 };
 
+// Helper function to get persistent tracking data from Firestore
+const getTrackingData = async (firestore, postId) => {
+  try {
+    const trackingDoc = await firestore.collection('volunteer_tracking').doc(postId).get();
+    if (trackingDoc.exists) {
+      const data = trackingDoc.data();
+      return {
+        processedUsers: new Set(data.processedUsers || []),
+        previousJoinedUsers: data.previousJoinedUsers || []
+      };
+    }
+  } catch (error) {
+    console.error(`[VOLUNTEER JOIN ERROR] Error getting tracking data for post ${postId}:`, error);
+  }
+
+  return {
+    processedUsers: new Set(),
+    previousJoinedUsers: []
+  };
+};
+
+// Helper function to save persistent tracking data to Firestore
+const saveTrackingData = async (firestore, postId, processedUsers, previousJoinedUsers) => {
+  try {
+    await firestore.collection('volunteer_tracking').doc(postId).set({
+      processedUsers: Array.from(processedUsers),
+      previousJoinedUsers: previousJoinedUsers,
+      lastUpdated: admin.firestore.FieldValue.serverTimestamp()
+    });
+  } catch (error) {
+    console.error(`[VOLUNTEER JOIN ERROR] Error saving tracking data for post ${postId}:`, error);
+  }
+};
+
 // Monitor for users joining volunteer posts
 const monitorVolunteerPostJoins = () => {
   const firestore = getFirestore();
-  
-  // Store the server start time
+
+  // Generate unique instance ID to detect multiple instances
+  const instanceId = `instance_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
+
+  // Track server startup time to prevent false notifications immediately after restart
   const serverStartTime = Date.now();
-  console.log(`[VOLUNTEER JOIN DEBUG] Server started at: ${new Date(serverStartTime).toISOString()}`);
+  const STARTUP_GRACE_PERIOD = 30 * 1000; // 30 seconds
 
-  console.log('Starting monitoring for users joining volunteer posts...');
-
-  // Keep track of processed joins to prevent duplicates
-  const processedJoins = new Set();
+  console.log(`[VOLUNTEER JOIN DEBUG] Starting monitoring for users joining volunteer posts... Instance ID: ${instanceId}`);
 
   // Listen for updates to volunteer posts
   firestore.collection('volunteer_posts')
     .onSnapshot(async (snapshot) => {
       try {
-        console.log('[VOLUNTEER JOIN DEBUG] Processing volunteer post changes');
-        
-        // Process only modified documents
-        const modifiedDocs = snapshot.docChanges()
+        console.log(`[VOLUNTEER JOIN DEBUG] [${instanceId}] Processing volunteer post changes`);
+
+        // Process all document changes
+        const changes = snapshot.docChanges();
+
+        // Process modified documents
+        const modifiedDocs = changes
           .filter(change => {
             // Only process 'modified' changes that are not local
             const isModified = change.type === 'modified';
             const isLocal = change.doc.metadata?.hasPendingWrites ?? false;
-            console.log(`[VOLUNTEER JOIN DEBUG] Change type: ${change.type}, isLocal: ${isLocal}`);
+            console.log(`[VOLUNTEER JOIN DEBUG] [${instanceId}] Change type: ${change.type}, isLocal: ${isLocal}, docId: ${change.doc.id}`);
             return isModified && !isLocal;
           })
           .map(change => {
-            const newData = change.doc.data();
-            // Get the actual previous state from the change.oldDoc
-            const oldData = change.oldDoc ? change.oldDoc.data() : undefined;
-            
-            console.log('[VOLUNTEER JOIN DEBUG] Previous state:', oldData);
-            console.log('[VOLUNTEER JOIN DEBUG] New state:', newData);
-            
+            const docData = change.doc.data();
+            const docId = change.doc.id;
+            console.log(`[VOLUNTEER JOIN DEBUG] [${instanceId}] Mapping document ${docId} with data:`, Object.keys(docData));
             return {
-              id: change.doc.id,
-              ...newData,
-              oldData
+              id: docId,
+              ...docData
             };
           });
 
-        console.log(`[VOLUNTEER JOIN DEBUG] Found ${modifiedDocs.length} modified volunteer posts`);
+        console.log(`[VOLUNTEER JOIN DEBUG] [${instanceId}] Found ${modifiedDocs.length} modified volunteer posts`);
 
         if (modifiedDocs.length === 0) {
           return;
         }
 
         for (const post of modifiedDocs) {
-          console.log(`[VOLUNTEER JOIN DEBUG] Processing changes for post: ${post.id}`);
-          console.log(`[VOLUNTEER JOIN DEBUG] Post title: "${post.title}"`);
-          console.log(`[VOLUNTEER JOIN DEBUG] Post creator (adminId): ${post.adminId}`);
-          console.log(`[VOLUNTEER JOIN DEBUG] Full post data:`, JSON.stringify(post, null, 2));
-          console.log(`[VOLUNTEER JOIN DEBUG] Community ID: ${post.communityId}`);
-          
+          console.log(`[VOLUNTEER JOIN DEBUG] [${instanceId}] Processing changes for post: ${post.id}`);
+          console.log(`[VOLUNTEER JOIN DEBUG] [${instanceId}] Post title: "${post.title}"`);
+          console.log(`[VOLUNTEER JOIN DEBUG] [${instanceId}] Post creator (adminId): ${post.adminId}`);
+
+          // Add additional debugging to understand the post structure
+          console.log(`[VOLUNTEER JOIN DEBUG] [${instanceId}] Full post data:`, JSON.stringify(post, null, 2));
+
+          // Skip if we don't have a valid post ID
+          if (!post.id || post.id.trim() === '') {
+            console.log(`[VOLUNTEER JOIN ERROR] [${instanceId}] Post is missing valid ID, skipping. Post data:`, JSON.stringify(post, null, 2));
+            continue;
+          }
+
           // Skip if we don't have the admin ID
           if (!post.adminId) {
-            console.log(`[VOLUNTEER JOIN DEBUG] Warning: Post ${post.id} is missing adminId`);
+            console.log(`[VOLUNTEER JOIN DEBUG] [${instanceId}] Warning: Post ${post.id} is missing adminId`);
             continue;
           }
 
-          // Check if joinedUsers has changed
+          // Get the current joined users
           const currentJoinedUsers = Array.isArray(post.joinedUsers) ? post.joinedUsers : [];
-          const previousJoinedUsers = post.oldData && Array.isArray(post.oldData.joinedUsers) ? 
-            post.oldData.joinedUsers : [];
-          
+
           console.log(`[VOLUNTEER JOIN DEBUG] Current joined users: [${currentJoinedUsers.join(', ')}]`);
-          console.log(`[VOLUNTEER JOIN DEBUG] Previous joined users: [${previousJoinedUsers.join(', ')}]`);
 
-          // Find the new users who joined by comparing arrays
-          const newUsers = currentJoinedUsers.filter(userId => !previousJoinedUsers.includes(userId));
-          
-          console.log(`[VOLUNTEER JOIN DEBUG] Detected new users: [${newUsers.join(', ')}]`);
+          // Get persistent tracking data from Firestore
+          console.log(`[VOLUNTEER JOIN DEBUG] [${instanceId}] Loading tracking data for post ${post.id} from Firestore...`);
+          const trackingData = await getTrackingData(firestore, post.id);
+          const alreadyProcessed = trackingData.processedUsers;
+          const previousUsers = trackingData.previousJoinedUsers;
 
-          if (newUsers.length === 0) {
-            console.log(`[VOLUNTEER JOIN DEBUG] No new users detected for post ${post.id}`);
+          console.log(`[VOLUNTEER JOIN DEBUG] [${instanceId}] Loaded from Firestore - Already processed users: [${Array.from(alreadyProcessed).join(', ')}]`);
+          console.log(`[VOLUNTEER JOIN DEBUG] [${instanceId}] Loaded from Firestore - Previous joined users: [${previousUsers.join(', ')}]`);
+
+          // If this is the first time we have tracking data for this post, we need to be smart about initialization
+          if (previousUsers.length === 0 && alreadyProcessed.size === 0) {
+            console.log(`[VOLUNTEER JOIN DEBUG] [${instanceId}] First time tracking post ${post.id}, initializing tracking`);
+
+            const timeSinceServerStart = Date.now() - serverStartTime;
+
+            // If we're within the startup grace period, be conservative to avoid false notifications
+            if (timeSinceServerStart < STARTUP_GRACE_PERIOD && currentJoinedUsers.length > 0) {
+              console.log(`[VOLUNTEER JOIN DEBUG] [${instanceId}] Within startup grace period (${timeSinceServerStart}ms < ${STARTUP_GRACE_PERIOD}ms) - marking existing users as processed`);
+
+              // Mark all current users as already processed to prevent false notifications on startup
+              currentJoinedUsers.forEach(userId => {
+                if (userId !== post.adminId) {
+                  alreadyProcessed.add(userId);
+                }
+              });
+
+              await saveTrackingData(firestore, post.id, alreadyProcessed, currentJoinedUsers);
+              console.log(`[VOLUNTEER JOIN DEBUG] [${instanceId}] Initialized tracking for post ${post.id} (startup grace period), skipping notifications for existing users`);
+              continue;
+            } else {
+              console.log(`[VOLUNTEER JOIN DEBUG] [${instanceId}] Past startup grace period (${timeSinceServerStart}ms >= ${STARTUP_GRACE_PERIOD}ms) - will process current users as potential new joiners`);
+
+              // Initialize with empty previous state so current users will be detected as new
+              await saveTrackingData(firestore, post.id, alreadyProcessed, []);
+            }
+          }
+
+          console.log(`[VOLUNTEER JOIN DEBUG] Already processed users for post ${post.id}: [${Array.from(alreadyProcessed).join(', ')}]`);
+          console.log(`[VOLUNTEER JOIN DEBUG] Previous joined users for post ${post.id}: [${previousUsers.join(', ')}]`);
+
+          // Find users who were added since the last snapshot (actual new joiners)
+          const actualNewJoiners = currentJoinedUsers.filter(userId => {
+            // Skip if the joined user is the post creator
+            if (userId === post.adminId) {
+              console.log(`[VOLUNTEER JOIN DEBUG] [${instanceId}] Skipping post creator ${userId} for post ${post.id}`);
+              return false;
+            }
+
+            const wasInPrevious = previousUsers.includes(userId);
+            const alreadyNotified = alreadyProcessed.has(userId);
+
+            console.log(`[VOLUNTEER JOIN DEBUG] [${instanceId}] User ${userId}: wasInPrevious=${wasInPrevious}, alreadyNotified=${alreadyNotified}`);
+
+            // Only include users who weren't in the previous snapshot AND haven't been processed yet
+            // This handles both new joins and prevents duplicates on server restart
+            return !wasInPrevious && !alreadyNotified;
+          });
+
+          // Find users who were removed since the last snapshot (cancellations)
+          const removedUsers = previousUsers.filter(userId => {
+            return !currentJoinedUsers.includes(userId);
+          });
+
+          console.log(`[VOLUNTEER JOIN DEBUG] [${instanceId}] Actual new joiners found: [${actualNewJoiners.join(', ')}]`);
+          console.log(`[VOLUNTEER JOIN DEBUG] [${instanceId}] Users who left/cancelled: [${removedUsers.join(', ')}]`);
+
+          // Handle cancellations - remove from processed users so they can rejoin later
+          if (removedUsers.length > 0) {
+            console.log(`[VOLUNTEER JOIN DEBUG] [${instanceId}] Cleaning up processed users for cancellations: [${removedUsers.join(', ')}]`);
+            removedUsers.forEach(userId => {
+              alreadyProcessed.delete(userId);
+            });
+          }
+
+          // Update the tracking data in Firestore
+          await saveTrackingData(firestore, post.id, alreadyProcessed, currentJoinedUsers);
+
+          if (actualNewJoiners.length === 0) {
+            console.log(`[VOLUNTEER JOIN DEBUG] [${instanceId}] No actual new joiners for post ${post.id}, skipping notifications`);
             continue;
           }
 
-          console.log(`[VOLUNTEER JOIN DEBUG] ${newUsers.length} new users joined post ${post.id}: ${newUsers.join(', ')}`);
-
-          // For each new user, send notification to the post creator
-          for (const newUserId of newUsers) {
+          // Process only the actual new joiners
+          for (const newJoiner of actualNewJoiners) {
             try {
-              // Create a unique key for this join to prevent duplicates
-              const joinKey = `${post.id}:${newUserId}`;
-              if (processedJoins.has(joinKey)) {
-                console.log(`[VOLUNTEER JOIN DEBUG] Skipping already processed join: ${joinKey}`);
-                continue;
-              }
-
-              // Skip if the new user is the post creator
-              if (newUserId === post.adminId) {
-                console.log(`[VOLUNTEER JOIN DEBUG] Skipping notification for post creator ${newUserId}`);
-                continue;
-              }
-
-              // Get new user's name from Realtime Database first
+              // Get user's name from Realtime Database first
               const db = getDatabase();
               let userName = 'Someone';
               try {
-                const userSnapshot = await db.ref(`/users/${newUserId}`).once('value');
+                const userSnapshot = await db.ref(`/users/${newJoiner}`).once('value');
                 const userData = userSnapshot.val();
                 if (userData) {
                   userName = userData.fullName || userData.displayName || userData.username || userName;
                 } else {
                   // Fallback to Firestore if not found in RTDB
-                  const userDoc = await firestore.collection('users').doc(newUserId).get();
+                  const userDoc = await firestore.collection('users').doc(newJoiner).get();
                   if (userDoc.exists) {
                     const firestoreData = userDoc.data();
                     userName = firestoreData.fullName || firestoreData.displayName || firestoreData.username || userName;
@@ -882,7 +975,7 @@ const monitorVolunteerPostJoins = () => {
                 console.error(`[VOLUNTEER JOIN ERROR] Error getting user name: ${nameError}`);
               }
 
-              console.log(`[VOLUNTEER JOIN DEBUG] Sending notification about user ${userName} (${newUserId}) to admin ${post.adminId}`);
+              console.log(`[VOLUNTEER JOIN DEBUG] Sending notification about NEW joiner ${userName} (${newJoiner}) to admin ${post.adminId}`);
 
               // Send notification to the post creator (admin)
               const { sendNotificationToUser } = require('./notifications');
@@ -895,18 +988,18 @@ const monitorVolunteerPostJoins = () => {
                   volunteerId: post.id,
                   postId: post.id,
                   communityId: post.communityId,
-                  joinerId: newUserId,
+                  joinerId: newJoiner,
                   priority: 'high',
                   forceAlert: 'true',
                   timestamp: Date.now()
                 }
               );
-              
+
               console.log(`[VOLUNTEER JOIN DEBUG] Successfully sent notification for post ${post.id} to admin ${post.adminId}`);
 
               // Also send a confirmation notification to the joiner
               await sendNotificationToUser(
-                newUserId,
+                newJoiner,
                 'Joined Volunteer Post',
                 `You have successfully joined the volunteer post: "${post.title}"`,
                 {
@@ -920,13 +1013,18 @@ const monitorVolunteerPostJoins = () => {
                   timestamp: Date.now()
                 }
               );
-              
-              // Mark this join as processed
-              processedJoins.add(joinKey);
-              
-              console.log(`[VOLUNTEER JOIN DEBUG] Successfully sent confirmation notification to joiner ${newUserId}`);
+
+              console.log(`[VOLUNTEER JOIN DEBUG] Successfully sent confirmation notification to joiner ${newJoiner}`);
+
+              // Mark this user as processed for this post
+              alreadyProcessed.add(newJoiner);
+              console.log(`[VOLUNTEER JOIN DEBUG] [${instanceId}] Marked user ${newJoiner} as processed for post ${post.id}`);
+
+              // Save updated tracking data to Firestore
+              await saveTrackingData(firestore, post.id, alreadyProcessed, currentJoinedUsers);
+
             } catch (userError) {
-              console.error(`[VOLUNTEER JOIN ERROR] Error processing user ${newUserId}:`, userError);
+              console.error(`[VOLUNTEER JOIN ERROR] Error processing user ${newJoiner}:`, userError);
               console.error(userError);
             }
           }
@@ -957,20 +1055,20 @@ const monitorCommentLikes = () => {
 
       // Get all comments
       const comments = noticeData.comments || {};
-      
+
       // Convert to array for easier processing
       const commentsArray = Object.entries(comments).map(([commentId, commentData]) => ({
         id: commentId,
         ...commentData
       }));
-      
+
       // Process each comment to check for new likes
       for (const comment of commentsArray) {
         // Skip comments with no likes
         if (!comment.likes) {
           continue;
         }
-        
+
         // Find likes added in the last 10 seconds
         const now = Date.now();
         const recentLikes = Object.entries(comment.likes)
@@ -979,20 +1077,20 @@ const monitorCommentLikes = () => {
             return (now - createdAt) < 10000; // 10 seconds
           })
           .map(([userId, _]) => userId);
-          
+
         if (recentLikes.length === 0) {
           continue;
         }
-        
+
         console.log(`[COMMENT_LIKE DEBUG] Recent likes detected on comment ${comment.id} in notice ${noticeId}: ${recentLikes.join(', ')}`);
-        
+
         // Enhanced check: Don't send notifications to authors of their own content
         // Check if the comment author is also the notice author
         const isCommentFromNoticeAuthor = comment.authorId === noticeData.authorId;
         if (isCommentFromNoticeAuthor) {
           console.log(`[COMMENT_LIKE DEBUG] Comment ${comment.id} is from the notice author: ${comment.authorId}`);
         }
-        
+
         // Process each like separately
         for (const likerId of recentLikes) {
           // Don't send notification if the comment author and like author are the same
@@ -1000,62 +1098,62 @@ const monitorCommentLikes = () => {
             console.log(`[COMMENT_LIKE DEBUG] Skipping notification as user ${likerId} liked their own comment`);
             continue;
           }
-          
+
           // FIX: The post author SHOULD receive notifications when people like their comments
           // The only time we want to skip notification is if the post author and comment author are the same
           // AND the liker is different (which is handled by the previous condition)
-          
+
           // Log action for debugging
           if (likerId === noticeData.authorId) {
             console.log(`[COMMENT_LIKE DEBUG] Post author ${likerId} liked a comment from user ${comment.authorId}`);
           }
-          
+
           // Check if either user is an admin and log for debugging purposes
           let likerIsAdmin = false;
           let commentAuthorIsAdmin = false;
           let noticeAuthorIsAdmin = false;
-          
+
           try {
             const [likerDoc, commentAuthorDoc, noticeAuthorDoc] = await Promise.all([
               firestore.collection('users').doc(likerId).get(),
               firestore.collection('users').doc(comment.authorId).get(),
               firestore.collection('users').doc(noticeData.authorId).get()
             ]);
-            
+
             likerIsAdmin = likerDoc.exists && (likerDoc.data().isAdmin || likerDoc.data().role === 'admin');
             commentAuthorIsAdmin = commentAuthorDoc.exists && (commentAuthorDoc.data().isAdmin || commentAuthorDoc.data().role === 'admin');
             noticeAuthorIsAdmin = noticeAuthorDoc.exists && (noticeAuthorDoc.data().isAdmin || noticeAuthorDoc.data().role === 'admin');
-            
+
             if (likerIsAdmin) {
               console.log(`[COMMENT_LIKE DEBUG] Liker ${likerId} is an admin`);
             }
-            
+
             if (commentAuthorIsAdmin) {
               console.log(`[COMMENT_LIKE DEBUG] Comment author ${comment.authorId} is an admin`);
             }
-            
+
             if (noticeAuthorIsAdmin) {
               console.log(`[COMMENT_LIKE DEBUG] Notice author ${noticeData.authorId} is an admin`);
             }
           } catch (error) {
             console.error(`[COMMENT_LIKE ERROR] Error checking admin status: ${error.message}`);
           }
-          
+
           // Get liker's name with enhanced retrieval - check multiple data sources
           let displayName = 'Someone';
-          
+
           try {
             // First try Realtime Database
             const likerSnapshot = await db.ref(`/users/${likerId}`).once('value');
             const likerData = likerSnapshot.val();
-            
+
             if (likerData) {
               console.log(`[COMMENT_LIKE DEBUG] Found user in RTDB: ${likerId}`);
               displayName = likerData.fullName || likerData.displayName || likerData.username || displayName;
             } else {
               console.log(`[COMMENT_LIKE DEBUG] User not found in RTDB: ${likerId}`);
             }
-            
+
             // If we still don't have a name, check Firestore
             if (displayName === 'Someone') {
               const userDocRef = await firestore.collection('users').doc(likerId).get();
@@ -1067,7 +1165,7 @@ const monitorCommentLikes = () => {
                 console.log(`[COMMENT_LIKE DEBUG] User not found in Firestore: ${likerId}`);
               }
             }
-            
+
             // Final check in userProfiles collection if it exists
             if (displayName === 'Someone') {
               const profileDocRef = await firestore.collection('userProfiles').doc(likerId).get();
@@ -1077,7 +1175,7 @@ const monitorCommentLikes = () => {
                 displayName = profileData.fullName || profileData.displayName || profileData.name || displayName;
               }
             }
-            
+
             // If we STILL don't have a name, use first part of email or ID
             if (displayName === 'Someone') {
               // Try to get email from auth
@@ -1100,22 +1198,22 @@ const monitorCommentLikes = () => {
             console.error(`[COMMENT_LIKE ERROR] Error retrieving user data: ${error.message}`);
             displayName = likerId.substring(0, 8) + '...'; // Shortened ID as fallback
           }
-          
+
           console.log(`[COMMENT_LIKE DEBUG] Final display name for ${likerId}: ${displayName}`);
-          
+
           // Get comment text for the notification
           let commentText = comment.text || comment.content || '';
           if (commentText.length > 30) {
             commentText = commentText.substring(0, 30) + '...';
           }
-          
+
           // If comment text is empty or undefined, use a default message
           if (!commentText || commentText.trim() === '') {
             commentText = '(No comment text)';
           }
-          
+
           console.log(`[COMMENT_LIKE DEBUG] Sending notification to ${comment.authorId} about like from ${displayName} on comment: "${commentText}"`);
-          
+
           // Send notification to the comment author with enhanced data
           const { sendNotificationToUser } = require('./notifications');
           await sendNotificationToUser(
@@ -1166,15 +1264,15 @@ const monitorCommentReplies = () => {
 
       // Process each comment to check for replies
       const commentsObj = noticeData.comments || {};
-      
+
       for (const commentId in commentsObj) {
         const comment = commentsObj[commentId];
-        
+
         // Skip if no replies
         if (!comment.replies) {
           continue;
         }
-        
+
         // Convert replies object to array with IDs
         const repliesObj = comment.replies || {};
         const repliesArray = Object.entries(repliesObj).map(([replyId, data]) => ({
@@ -1182,37 +1280,37 @@ const monitorCommentReplies = () => {
           ...data,
           createdAt: data.createdAt || 0
         }));
-        
+
         // Skip if no replies
         if (repliesArray.length === 0) {
           continue;
         }
-        
+
         // Sort by createdAt (newest first)
         repliesArray.sort((a, b) => b.createdAt - a.createdAt);
-        
+
         // Get the latest reply
         const latestReply = repliesArray[0];
-        
+
         // Check if the reply was just added (within the last 10 seconds)
         const now = Date.now();
         if (now - latestReply.createdAt > 10000) {
           continue;
         }
-        
+
         console.log(`[REPLY DEBUG] Latest reply on comment ${commentId} in notice ${noticeId}:`, JSON.stringify(latestReply));
-        
+
         // Check if this is a reply to a specific user (mentioned with @username) before skipping based on author
         const content = latestReply.content || '';
         const mentionMatch = content.match(/@([a-zA-Z0-9_]+(?:\s+[a-zA-Z0-9_]+)*)/);
         let mentionedUsername = null;
         let mentionedUserId = null;
         let replyToUserId = null;
-        
+
         // First check if this is a reply to another reply (using replyToId)
         if (latestReply.replyToId) {
           console.log(`[REPLY DEBUG] This is a reply to another reply: ${latestReply.replyToId}`);
-          
+
           // Find the reply that this is responding to
           for (const replyObj of repliesArray) {
             if (replyObj.id === latestReply.replyToId) {
@@ -1222,39 +1320,39 @@ const monitorCommentReplies = () => {
             }
           }
         }
-        
+
         if (mentionMatch && mentionMatch[1]) {
           mentionedUsername = mentionMatch[1].trim();
           console.log(`[REPLY DEBUG] Username mention detected: "${mentionedUsername}"`);
-          
+
           // Look up the user ID by their username/name
           try {
             // Add more logging to help troubleshoot
             console.log(`[REPLY DEBUG] Searching for user with displayName "${mentionedUsername}" in Firestore`);
-            
+
             // Search for mentioned user in Firestore by displayName or username
             const usersSnapshot = await firestore.collection('users')
               .where('displayName', '==', mentionedUsername)
               .limit(1)
               .get();
-            
+
             if (!usersSnapshot.empty) {
               const mentionedUserDoc = usersSnapshot.docs[0];
               mentionedUserId = mentionedUserDoc.id;
               console.log(`[REPLY DEBUG] Found mentioned user ID: ${mentionedUserId}`);
             } else {
               console.log(`[REPLY DEBUG] No user found with exact displayName match, trying alternative lookups`);
-              
+
               // Try a more flexible search approach - get all users and do client-side filtering
               const allUsersSnapshot = await firestore.collection('users')
                 .limit(100)  // Limit to first 100 users to avoid excessive data transfer
                 .get();
-                
+
               const potentialMatches = [];
               allUsersSnapshot.forEach(doc => {
                 const userData = doc.data();
                 const displayName = userData.displayName || userData.fullName || userData.username || '';
-                
+
                 // Check if display name contains the mentioned username (case insensitive)
                 if (displayName.toLowerCase().includes(mentionedUsername.toLowerCase())) {
                   potentialMatches.push({
@@ -1264,9 +1362,9 @@ const monitorCommentReplies = () => {
                   });
                 }
               });
-              
+
               console.log(`[REPLY DEBUG] Found ${potentialMatches.length} potential matches:`, JSON.stringify(potentialMatches));
-              
+
               // Use the best match (prefer exact match, otherwise first partial match)
               const exactMatch = potentialMatches.find(match => match.exactMatch);
               if (exactMatch) {
@@ -1282,13 +1380,13 @@ const monitorCommentReplies = () => {
                   // This is a basic implementation - in a real app, you'd need proper security rules
                   // Get a list of users from auth (up to 1000 users)
                   const listUsersResult = await admin.auth().listUsers(1000);
-                  
+
                   // Search for matching displayName in auth users
                   const authMatch = listUsersResult.users.find(user => {
                     const authDisplayName = user.displayName || '';
                     return authDisplayName.toLowerCase().includes(mentionedUsername.toLowerCase());
                   });
-                  
+
                   if (authMatch) {
                     mentionedUserId = authMatch.uid;
                     console.log(`[REPLY DEBUG] Found user in Firebase Auth: ${mentionedUserId} (${authMatch.displayName || authMatch.email})`);
@@ -1304,13 +1402,13 @@ const monitorCommentReplies = () => {
             console.error(`[REPLY ERROR] Error processing user mention: ${error.message}`);
           }
         }
-        
+
         // If we have a replyToId but couldn't find a mention, use the replyToUserId
         if (!mentionedUserId && replyToUserId) {
           mentionedUserId = replyToUserId;
           console.log(`[REPLY DEBUG] Using replyToUserId as mentionedUserId: ${mentionedUserId}`);
         }
-        
+
         // If the reply author is the same as the comment author AND there's no mention/replyTo, skip notification
         // However, if there's a mention to another user, we should continue processing to send the mention notification
         if (latestReply.authorId === comment.authorId && !mentionedUserId) {
@@ -1320,16 +1418,16 @@ const monitorCommentReplies = () => {
           console.log(`[REPLY DEBUG] Comment author is replying with a mention to user ${mentionedUserId}, will send mention notification`);
           // Continue processing for the mention notification
         }
-        
+
         // Get commenter's name for the notification
         let replyAuthorName = 'Someone';
-        
+
         try {
           // Try multiple sources to get the reply author's name
           // First try Realtime Database
           const authorSnapshot = await db.ref(`/users/${latestReply.authorId}`).once('value');
           const authorData = authorSnapshot.val();
-          
+
           if (authorData) {
             replyAuthorName = authorData.fullName || authorData.displayName || authorData.username || replyAuthorName;
           } else {
@@ -1350,26 +1448,26 @@ const monitorCommentReplies = () => {
         } catch (error) {
           console.error(`[REPLY ERROR] Error retrieving reply author data: ${error.message}`);
         }
-        
+
         // Format the reply content for notification
         let replyContent = latestReply.content || '';
         if (typeof replyContent !== 'string') {
           replyContent = String(replyContent || '');
         }
-        
+
         if (replyContent.length > 50) {
           replyContent = replyContent.substring(0, 50) + '...';
         }
-        
+
         if (!replyContent || replyContent.trim() === '') {
           replyContent = '(No reply text)';
         }
-        
+
         console.log(`[REPLY DEBUG] Sending notification to ${comment.authorId} about reply from ${replyAuthorName}: "${replyContent}"`);
-        
+
         // Send notification to the comment author
         const { sendNotificationToUser } = require('./notifications');
-        
+
         // Only send notification to comment author if they're not the same as reply author
         if (comment.authorId !== latestReply.authorId) {
           await sendNotificationToUser(
@@ -1389,14 +1487,14 @@ const monitorCommentReplies = () => {
             }
           );
         }
-        
+
         // If there's a mention, send notification to the mentioned user (if not already sent above)
         if (mentionedUserId && mentionedUserId !== latestReply.authorId) {
           // If the mentioned user is the comment author and the reply author is different, we've already sent them a notification above
           // Only need to send another notification if they're not the comment author, or if the reply author is the comment author
           if (mentionedUserId !== comment.authorId || latestReply.authorId === comment.authorId) {
             console.log(`[REPLY DEBUG] Sending mention notification to user ${mentionedUserId}`);
-            
+
             // Send notification to the mentioned user
             await sendNotificationToUser(
               mentionedUserId,
@@ -1419,7 +1517,7 @@ const monitorCommentReplies = () => {
       }
     } catch (error) {
       console.error('[REPLY ERROR] Error processing comment replies:', error);
-      
+
       // Record the error for debugging
       try {
         await firestore.collection('notification_errors').add({
@@ -1454,27 +1552,27 @@ const monitorCommentReplyLikes = () => {
 
       // Get all comments
       const comments = noticeData.comments || {};
-      
+
       // Process each comment to check for replies with likes
       for (const commentId in comments) {
         const comment = comments[commentId];
-        
+
         // Skip comments with no replies
         if (!comment.replies) {
           continue;
         }
-        
+
         // Process each reply to check for likes
         const replies = comment.replies || {};
-        
+
         for (const replyId in replies) {
           const reply = replies[replyId];
-          
+
           // Skip replies with no likes
           if (!reply.likes) {
             continue;
           }
-          
+
           // Find likes added in the last 10 seconds
           const now = Date.now();
           const recentLikes = Object.entries(reply.likes)
@@ -1483,13 +1581,13 @@ const monitorCommentReplyLikes = () => {
               return (now - createdAt) < 10000; // 10 seconds
             })
             .map(([userId, _]) => userId);
-            
+
           if (recentLikes.length === 0) {
             continue;
           }
-          
+
           console.log(`[REPLY_LIKE DEBUG] Recent likes detected on reply ${replyId} in comment ${commentId}, notice ${noticeId}: ${recentLikes.join(', ')}`);
-          
+
           // Process each like separately
           for (const likerId of recentLikes) {
             // Don't send notification if the reply author and like author are the same
@@ -1497,20 +1595,20 @@ const monitorCommentReplyLikes = () => {
               console.log(`[REPLY_LIKE DEBUG] Skipping notification as user ${likerId} liked their own reply`);
               continue;
             }
-            
+
             // Get liker's name for the notification
             let displayName = 'Someone';
             let likerIsAdmin = false;
             let replyAuthorIsAdmin = false;
             let commentAuthorIsAdmin = false;
             let noticeAuthorIsAdmin = false;
-            
+
             try {
               // Try multiple sources to get the liker's name
               // First check Realtime Database
               const userSnapshot = await db.ref(`/users/${likerId}`).once('value');
               const userData = userSnapshot.val();
-              
+
               if (userData) {
                 displayName = userData.fullName || userData.displayName || userData.username || displayName;
                 likerIsAdmin = userData.isAdmin || userData.admin || false;
@@ -1521,38 +1619,30 @@ const monitorCommentReplyLikes = () => {
                   const userFirestoreData = userDocRef.data();
                   displayName = userFirestoreData.fullName || userFirestoreData.displayName || userFirestoreData.username || displayName;
                   likerIsAdmin = userFirestoreData.isAdmin || userFirestoreData.admin || false;
-                } else {
-                  // Final check in userProfiles collection
-                  const profileDocRef = await firestore.collection('userProfiles').doc(likerId).get();
-                  if (profileDocRef.exists) {
-                    const profileData = profileDocRef.data();
-                    displayName = profileData.fullName || profileData.displayName || profileData.name || displayName;
-                    likerIsAdmin = profileData.isAdmin || profileData.admin || false;
-                  }
                 }
               }
-              
+
               // Check if the reply author is an admin
               const replyAuthorDocRef = await firestore.collection('users').doc(reply.authorId).get();
               if (replyAuthorDocRef.exists) {
                 const replyAuthorData = replyAuthorDocRef.data();
                 replyAuthorIsAdmin = replyAuthorData.isAdmin || replyAuthorData.admin || false;
               }
-              
+
               // Check if the comment author is an admin
               const commentAuthorDocRef = await firestore.collection('users').doc(comment.authorId).get();
               if (commentAuthorDocRef.exists) {
                 const commentAuthorData = commentAuthorDocRef.data();
                 commentAuthorIsAdmin = commentAuthorData.isAdmin || commentAuthorData.admin || false;
               }
-              
+
               // Check if the notice author is an admin
               const noticeAuthorDocRef = await firestore.collection('users').doc(noticeData.authorId).get();
               if (noticeAuthorDocRef.exists) {
                 const noticeAuthorData = noticeAuthorDocRef.data();
                 noticeAuthorIsAdmin = noticeAuthorData.isAdmin || noticeAuthorData.admin || false;
               }
-              
+
               // If we STILL don't have a name, use first part of email or ID
               if (displayName === 'Someone') {
                 // Try to get email from auth
@@ -1575,22 +1665,22 @@ const monitorCommentReplyLikes = () => {
               console.error(`[REPLY_LIKE ERROR] Error retrieving user data: ${error.message}`);
               displayName = likerId.substring(0, 8) + '...'; // Shortened ID as fallback
             }
-            
+
             console.log(`[REPLY_LIKE DEBUG] Final display name for ${likerId}: ${displayName}`);
-            
+
             // Get reply text for the notification
             let replyText = reply.text || reply.content || '';
             if (replyText.length > 30) {
               replyText = replyText.substring(0, 30) + '...';
             }
-            
+
             // If reply text is empty or undefined, use a default message
             if (!replyText || replyText.trim() === '') {
               replyText = '(No reply text)';
             }
-            
+
             console.log(`[REPLY_LIKE DEBUG] Sending notification to ${reply.authorId} about like from ${displayName} on reply: "${replyText}"`);
-            
+
             // Send notification to the reply author with enhanced data
             const { sendNotificationToUser } = require('./notifications');
             await sendNotificationToUser(
