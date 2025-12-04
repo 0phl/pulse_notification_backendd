@@ -739,6 +739,7 @@ const monitorReportStatusUpdates = () => {
 
   // Track previous status of reports to detect changes
   const reportStatusCache = new Map();
+  let isInitialized = false;
 
   console.log('Starting monitoring for report status updates...');
 
@@ -747,6 +748,21 @@ const monitorReportStatusUpdates = () => {
     .onSnapshot(async (snapshot) => {
       try {
         console.log('[REPORT STATUS DEBUG] Received report status snapshot');
+        
+        // On first snapshot, initialize the cache with all existing reports
+        if (!isInitialized) {
+          console.log('[REPORT STATUS DEBUG] Initializing cache with existing reports...');
+          snapshot.docs.forEach(doc => {
+            const data = doc.data();
+            if (data.status) {
+              reportStatusCache.set(doc.id, data.status);
+              console.log(`[REPORT STATUS DEBUG] Cached initial status for report ${doc.id}: ${data.status}`);
+            }
+          });
+          isInitialized = true;
+          console.log(`[REPORT STATUS DEBUG] Cache initialized with ${reportStatusCache.size} reports`);
+          return; // Don't process changes on first snapshot
+        }
         
         // Process only modified documents
         const modifiedDocs = snapshot.docChanges()
@@ -774,20 +790,34 @@ const monitorReportStatusUpdates = () => {
 
           console.log(`[REPORT STATUS DEBUG] Report ${reportId}: previous="${previousStatus}", current="${currentStatus}"`);
 
-          // If we haven't seen this report before, just cache its status
+          // If we haven't seen this report before, cache it but don't skip notification
+          // This handles the case where the server starts after a report was created
           if (!previousStatus) {
-            console.log(`[REPORT STATUS DEBUG] First time seeing report ${reportId}, caching status: ${currentStatus}`);
+            console.log(`[REPORT STATUS DEBUG] First time seeing report ${reportId} in changes, caching status: ${currentStatus}`);
             reportStatusCache.set(reportId, currentStatus);
-            continue;
+            
+            // If status is not "pending", it means the report was updated while server was offline
+            // We should still send notification for non-pending statuses
+            if (currentStatus !== 'pending') {
+              console.log(`[REPORT STATUS DEBUG] Status is not pending (${currentStatus}), will send notification`);
+              // Don't skip - continue to send notification
+            } else {
+              console.log(`[REPORT STATUS DEBUG] Status is pending, skipping notification for new report`);
+              continue;
+            }
           }
 
-          // Check if status has changed
-          if (currentStatus === previousStatus) {
+          // Check if status has changed (only if we have a previous status)
+          if (previousStatus && currentStatus === previousStatus) {
             console.log(`[REPORT STATUS DEBUG] No status change for report ${reportId}`);
             continue;
           }
 
-          console.log(`[REPORT STATUS DEBUG] Report status update detected for report ${reportId}: ${previousStatus} -> ${currentStatus}`);
+          if (previousStatus) {
+            console.log(`[REPORT STATUS DEBUG] Report status update detected for report ${reportId}: ${previousStatus} -> ${currentStatus}`);
+          } else {
+            console.log(`[REPORT STATUS DEBUG] Report status detected for report ${reportId}: ${currentStatus} (no previous status cached)`);
+          }
 
           // Update the cache with new status
           reportStatusCache.set(reportId, currentStatus);
