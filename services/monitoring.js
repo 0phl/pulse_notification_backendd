@@ -573,6 +573,153 @@ const monitorChatMessages = () => {
   });
 };
 
+// Monitor for new reports
+const monitorNewReports = () => {
+  const firestore = getFirestore();
+
+  // Store the server start time to filter out old reports
+  const serverStartTime = Date.now();
+  console.log(`[REPORT DEBUG] Server started at: ${new Date(serverStartTime).toISOString()}`);
+
+  console.log('Starting monitoring for new reports...');
+
+  // Listen for new reports
+  firestore.collection('reports')
+    .orderBy('createdAt', 'desc')
+    .limit(20)
+    .onSnapshot(async (snapshot) => {
+      try {
+        console.log('[REPORT DEBUG] Received reports snapshot');
+
+        // Process only added documents
+        const addedDocs = snapshot.docChanges()
+          .filter(change => change.type === 'added')
+          .map(change => ({
+            id: change.doc.id,
+            ...change.doc.data()
+          }));
+
+        console.log(`[REPORT DEBUG] Found ${addedDocs.length} new reports`);
+
+        if (addedDocs.length === 0) {
+          return;
+        }
+
+        // Get current time
+        const now = Date.now();
+
+        // Process reports that have valid createdAt timestamp
+        const validReports = addedDocs.filter(report => {
+          console.log(`[REPORT DEBUG] Processing report ${report.id}`);
+
+          // Check required fields
+          if (!report.userId) {
+            console.log(`[REPORT DEBUG] Report ${report.id} missing userId`);
+            return false;
+          }
+
+          if (!report.communityId) {
+            console.log(`[REPORT DEBUG] Report ${report.id} missing communityId`);
+            return false;
+          }
+
+          // Check if report has createdAt timestamp
+          if (!report.createdAt) {
+            console.log(`[REPORT DEBUG] Report ${report.id} missing createdAt timestamp`);
+            return false;
+          }
+
+          // Convert Firestore timestamp to milliseconds
+          const createdAtMs = report.createdAt.toMillis ?
+            report.createdAt.toMillis() :
+            (report.createdAt._seconds ? report.createdAt._seconds * 1000 : 0);
+
+          // Skip reports created before server start (prevents duplicate notifications on restart)
+          if (createdAtMs < serverStartTime) {
+            console.log(`[REPORT DEBUG] Skipping report ${report.id} - created before server start`);
+            return false;
+          }
+
+          // Only process reports created in the last 5 minutes
+          if (now - createdAtMs > 5 * 60 * 1000) {
+            console.log(`[REPORT DEBUG] Skipping report ${report.id} - too old (${Math.floor((now - createdAtMs)/1000)} seconds)`);
+            return false;
+          }
+
+          console.log(`[REPORT DEBUG] Report ${report.id} created at: ${new Date(createdAtMs).toISOString()}`);
+          console.log(`[REPORT DEBUG] Report ${report.id} passed all checks, will send notification`);
+          return true;
+        });
+
+        console.log(`[REPORT DEBUG] ${validReports.length} reports passed filtering out of ${addedDocs.length} total`);
+
+        if (validReports.length === 0) {
+          return;
+        }
+
+        for (const report of validReports) {
+          console.log(`[REPORT DEBUG] Preparing to send notification for report: ${report.id}`);
+          console.log(`[REPORT DEBUG] Community ID: ${report.communityId}`);
+          console.log(`[REPORT DEBUG] Reporter ID: ${report.userId}`);
+          console.log(`[REPORT DEBUG] Issue Type: ${report.issueType}`);
+
+          try {
+            // Get community admins to send them notifications
+            const communityAdmins = await firestore
+              .collection('users')
+              .where('communityId', '==', report.communityId)
+              .where('isAdmin', '==', true)
+              .get();
+
+            console.log(`[REPORT DEBUG] Found ${communityAdmins.size} admins in community ${report.communityId}`);
+
+            if (communityAdmins.empty) {
+              console.log(`[REPORT DEBUG] No admins found for community ${report.communityId}`);
+              continue;
+            }
+
+            // Send notification to each admin
+            const { sendNotificationToUser } = require('./notifications');
+            
+            for (const adminDoc of communityAdmins.docs) {
+              const adminId = adminDoc.id;
+              
+              // Don't send notification to the reporter if they are also an admin
+              if (adminId === report.userId) {
+                console.log(`[REPORT DEBUG] Skipping notification to ${adminId} (reporter is admin)`);
+                continue;
+              }
+
+              console.log(`[REPORT DEBUG] Sending notification to admin ${adminId}`);
+              
+              await sendNotificationToUser(
+                adminId,
+                'New Community Report',
+                `A new report has been submitted: "${report.issueType}"${report.description ? ` - ${report.description.substring(0, 50)}${report.description.length > 50 ? '...' : ''}` : ''}`,
+                {
+                  type: 'reports',
+                  reportId: report.id,
+                  communityId: report.communityId,
+                  userId: report.userId,
+                  issueType: report.issueType,
+                  priority: 'high',
+                  forceAlert: 'true',
+                  timestamp: Date.now()
+                }
+              );
+            }
+
+            console.log(`[REPORT DEBUG] Notifications sent for report ${report.id}`);
+          } catch (error) {
+            console.error(`[REPORT ERROR] Failed to send notification for report ${report.id}:`, error);
+          }
+        }
+      } catch (error) {
+        console.error('[REPORT ERROR] Error processing new reports:', error);
+      }
+    });
+};
+
 // Monitor for report status updates
 const monitorReportStatusUpdates = () => {
   const firestore = getFirestore();
@@ -1724,6 +1871,7 @@ const startAllMonitoring = () => {
     monitorCommunityNoticeLikes();
     monitorMarketplaceItems();
     monitorChatMessages();
+    monitorNewReports();
     monitorReportStatusUpdates();
     monitorVolunteerPosts();
     monitorVolunteerPostJoins();
@@ -1744,6 +1892,7 @@ module.exports = {
   monitorCommunityNoticeLikes,
   monitorMarketplaceItems,
   monitorChatMessages,
+  monitorNewReports,
   monitorReportStatusUpdates,
   monitorVolunteerPosts,
   monitorVolunteerPostJoins,
