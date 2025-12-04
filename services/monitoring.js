@@ -664,16 +664,29 @@ const monitorNewReports = () => {
           console.log(`[REPORT DEBUG] Issue Type: ${report.issueType}`);
 
           try {
-            // Get community admins to send them notifications
-            const communityAdmins = await firestore
+            // Get all users in the community first, then filter for admins
+            // This avoids the need for a composite index and matches how community notices work
+            const communityUsers = await firestore
               .collection('users')
               .where('communityId', '==', report.communityId)
-              .where('isAdmin', '==', true)
               .get();
 
-            console.log(`[REPORT DEBUG] Found ${communityAdmins.size} admins in community ${report.communityId}`);
+            console.log(`[REPORT DEBUG] Found ${communityUsers.size} users in community ${report.communityId}`);
 
-            if (communityAdmins.empty) {
+            if (communityUsers.empty) {
+              console.log(`[REPORT DEBUG] No users found for community ${report.communityId}`);
+              continue;
+            }
+
+            // Filter for admins from the community users
+            const communityAdmins = communityUsers.docs.filter(doc => {
+              const userData = doc.data();
+              return userData.isAdmin === true || userData.role === 'admin';
+            });
+
+            console.log(`[REPORT DEBUG] Found ${communityAdmins.length} admins in community ${report.communityId}`);
+
+            if (communityAdmins.length === 0) {
               console.log(`[REPORT DEBUG] No admins found for community ${report.communityId}`);
               continue;
             }
@@ -681,7 +694,7 @@ const monitorNewReports = () => {
             // Send notification to each admin
             const { sendNotificationToUser } = require('./notifications');
             
-            for (const adminDoc of communityAdmins.docs) {
+            for (const adminDoc of communityAdmins) {
               const adminId = adminDoc.id;
               
               // Don't send notification to the reporter if they are also an admin
