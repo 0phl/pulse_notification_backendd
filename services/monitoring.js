@@ -854,8 +854,8 @@ const monitorReportStatusUpdates = () => {
           }
 
           // Store the notification in Firestore for the notification UI
+          // Store in community_notifications to be consistent with other notifications
           const notificationData = {
-            userId: report.userId,
             title: 'Report Status Updated',
             body: `Your report "${report.issueType || 'Community Issue'}" has been updated to: ${formattedStatus}`,
             type: 'reports',
@@ -864,32 +864,31 @@ const monitorReportStatusUpdates = () => {
               status: currentStatus,
               previousStatus: previousStatus || 'pending',
               communityId: report.communityId,
-              issueType: report.issueType
+              issueType: report.issueType,
+              userId: report.userId // Include userId in data for filtering
             },
-            read: false,
-            createdAt: admin.firestore.FieldValue.serverTimestamp()
+            communityId: report.communityId, // Include communityId to store in community_notifications
+            createdAt: admin.firestore.FieldValue.serverTimestamp(),
+            createdBy: 'system'
           };
 
           let notificationId;
           try {
-            const notificationRef = await firestore.collection('user_notifications').add(notificationData);
+            const notificationRef = await firestore.collection('community_notifications').add(notificationData);
             notificationId = notificationRef.id;
-            console.log(`[REPORT STATUS DEBUG] Stored notification in user_notifications collection with ID: ${notificationId}`);
+            console.log(`[REPORT STATUS DEBUG] Stored notification in community_notifications collection with ID: ${notificationId}`);
             console.log(`[REPORT STATUS DEBUG] Notification data:`, JSON.stringify(notificationData, null, 2));
 
-            // Create notification status record
-            // NOTE: We intentionally do NOT include communityId here because report status
-            // notifications are stored in user_notifications (not community_notifications)
-            // The absence of communityId tells getUserNotifications to query user_notifications
+            // Create notification status record WITH communityId (consistent with other community notifications)
             const statusRef = await firestore.collection('notification_status').add({
               userId: report.userId,
               notificationId: notificationId,
+              communityId: report.communityId, // Include communityId
               read: false,
               createdAt: admin.firestore.FieldValue.serverTimestamp()
-              // communityId is intentionally omitted - this is a user-specific notification
             });
             console.log(`[REPORT STATUS DEBUG] Created notification_status record with ID: ${statusRef.id}`);
-            console.log(`[REPORT STATUS DEBUG] Status record links user ${report.userId} to notification ${notificationId} in user_notifications`);
+            console.log(`[REPORT STATUS DEBUG] Status record links user ${report.userId} to notification ${notificationId} in community_notifications`);
           } catch (storeError) {
             console.error(`[REPORT STATUS ERROR] Error storing notification:`, storeError);
             // Generate a local ID if Firestore fails
