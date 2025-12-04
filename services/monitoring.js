@@ -841,7 +841,56 @@ const monitorReportStatusUpdates = () => {
 
           console.log(`[REPORT STATUS DEBUG] Sending status update notification to user ${report.userId}`);
 
-          // Send notification to the report creator
+          // Check if the user is an admin to prevent admins from receiving their own report status updates
+          const recipientDoc = await firestore.collection('users').doc(report.userId).get();
+          const isRecipientAdmin = recipientDoc.exists && (recipientDoc.data().isAdmin === true || recipientDoc.data().role === 'admin');
+          
+          if (isRecipientAdmin && report.updatedBy) {
+            // If recipient is admin and they updated it themselves, skip notification
+            if (report.updatedBy === report.userId) {
+              console.log(`[REPORT STATUS DEBUG] Skipping notification - admin ${report.userId} updated their own report`);
+              continue;
+            }
+          }
+
+          // Store the notification in Firestore for the notification UI
+          const notificationData = {
+            userId: report.userId,
+            title: 'Report Status Updated',
+            body: `Your report "${report.issueType || 'Community Issue'}" has been updated to: ${formattedStatus}`,
+            type: 'reports',
+            data: {
+              reportId: report.id,
+              status: currentStatus,
+              previousStatus: previousStatus || 'pending',
+              communityId: report.communityId,
+              issueType: report.issueType
+            },
+            read: false,
+            createdAt: admin.firestore.FieldValue.serverTimestamp()
+          };
+
+          let notificationId;
+          try {
+            const notificationRef = await firestore.collection('user_notifications').add(notificationData);
+            notificationId = notificationRef.id;
+            console.log(`[REPORT STATUS DEBUG] Stored notification in Firestore with ID: ${notificationId}`);
+
+            // Create notification status record
+            await firestore.collection('notification_status').add({
+              userId: report.userId,
+              notificationId: notificationId,
+              read: false,
+              createdAt: admin.firestore.FieldValue.serverTimestamp()
+            });
+            console.log(`[REPORT STATUS DEBUG] Created notification status record for user ${report.userId}`);
+          } catch (storeError) {
+            console.error(`[REPORT STATUS ERROR] Error storing notification:`, storeError);
+            // Generate a local ID if Firestore fails
+            notificationId = `local_${Date.now()}_${Math.random().toString(36).substring(2, 15)}`;
+          }
+
+          // Send FCM push notification to the report creator
           const { sendNotificationToUser } = require('./notifications');
           await sendNotificationToUser(
             report.userId,
@@ -851,11 +900,12 @@ const monitorReportStatusUpdates = () => {
               type: 'reports',
               reportId: report.id,
               status: currentStatus,
-              previousStatus: previousStatus,
+              previousStatus: previousStatus || 'pending',
               communityId: report.communityId,
               priority: 'high',
               forceAlert: 'true',
-              timestamp: Date.now()
+              timestamp: Date.now(),
+              notificationId: notificationId
             }
           );
 
