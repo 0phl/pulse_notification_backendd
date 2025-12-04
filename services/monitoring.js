@@ -737,53 +737,102 @@ const monitorNewReports = () => {
 const monitorReportStatusUpdates = () => {
   const firestore = getFirestore();
 
+  // Track previous status of reports to detect changes
+  const reportStatusCache = new Map();
+
   console.log('Starting monitoring for report status updates...');
 
   // Listen for updates to reports
   firestore.collection('reports')
     .onSnapshot(async (snapshot) => {
       try {
+        console.log('[REPORT STATUS DEBUG] Received report status snapshot');
+        
         // Process only modified documents
         const modifiedDocs = snapshot.docChanges()
-          .filter(change => change.type === 'modified')
+          .filter(change => {
+            // Only process server-side modifications (not local writes)
+            const isModified = change.type === 'modified';
+            const isLocal = change.doc.metadata?.hasPendingWrites ?? false;
+            return isModified && !isLocal;
+          })
           .map(change => ({
             id: change.doc.id,
-            ...change.doc.data(),
-            oldData: change.doc.metadata.hasPendingWrites ? null : change.doc.data()
+            ...change.doc.data()
           }));
+
+        console.log(`[REPORT STATUS DEBUG] Found ${modifiedDocs.length} modified reports`);
 
         if (modifiedDocs.length === 0) {
           return;
         }
 
         for (const report of modifiedDocs) {
-          // Skip if we don't have the old data (local change)
-          if (!report.oldData) {
+          const reportId = report.id;
+          const currentStatus = report.status;
+          const previousStatus = reportStatusCache.get(reportId);
+
+          console.log(`[REPORT STATUS DEBUG] Report ${reportId}: previous="${previousStatus}", current="${currentStatus}"`);
+
+          // If we haven't seen this report before, just cache its status
+          if (!previousStatus) {
+            console.log(`[REPORT STATUS DEBUG] First time seeing report ${reportId}, caching status: ${currentStatus}`);
+            reportStatusCache.set(reportId, currentStatus);
             continue;
           }
 
           // Check if status has changed
-          if (report.status === report.oldData.status) {
+          if (currentStatus === previousStatus) {
+            console.log(`[REPORT STATUS DEBUG] No status change for report ${reportId}`);
             continue;
           }
 
-          console.log(`Report status update detected for report ${report.id}: ${report.oldData.status} -> ${report.status}`);
+          console.log(`[REPORT STATUS DEBUG] Report status update detected for report ${reportId}: ${previousStatus} -> ${currentStatus}`);
+
+          // Update the cache with new status
+          reportStatusCache.set(reportId, currentStatus);
+
+          // Validate required fields before sending notification
+          if (!report.userId) {
+            console.log(`[REPORT STATUS ERROR] Report ${reportId} missing userId, cannot send notification`);
+            continue;
+          }
+
+          if (!report.issueType) {
+            console.log(`[REPORT STATUS ERROR] Report ${reportId} missing issueType, using default`);
+          }
+
+          // Format status for display (replace underscores with spaces and capitalize)
+          const formattedStatus = currentStatus
+            .replace(/_/g, ' ')
+            .split(' ')
+            .map(word => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase())
+            .join(' ');
+
+          console.log(`[REPORT STATUS DEBUG] Sending status update notification to user ${report.userId}`);
 
           // Send notification to the report creator
           const { sendNotificationToUser } = require('./notifications');
           await sendNotificationToUser(
             report.userId,
             'Report Status Updated',
-            `Your report "${report.issueType}" has been updated to: ${report.status.replace('_', ' ')}`,
+            `Your report "${report.issueType || 'Community Issue'}" has been updated to: ${formattedStatus}`,
             {
               type: 'reports',
               reportId: report.id,
-              status: report.status,
+              status: currentStatus,
+              previousStatus: previousStatus,
+              communityId: report.communityId,
+              priority: 'high',
+              forceAlert: 'true',
+              timestamp: Date.now()
             }
           );
+
+          console.log(`[REPORT STATUS DEBUG] Successfully sent status update notification for report ${reportId}`);
         }
       } catch (error) {
-        console.error('Error processing report status updates:', error);
+        console.error('[REPORT STATUS ERROR] Error processing report status updates:', error);
       }
     });
 };
