@@ -47,10 +47,10 @@ async function createUserNotificationRecord(db, userId, notificationId, communit
 
 // Send a notification to a specific user
 const sendNotificationToUser = async (userId, title, body, data = {}) => {
+  // Generate a unique request ID for this notification
+  const requestId = `req_${Date.now()}_${Math.random().toString(36).substring(2, 10)}`;
+  
   try {
-    // Generate a unique request ID for this notification
-    const requestId = `req_${Date.now()}_${Math.random().toString(36).substring(2, 10)}`;
-    
     console.log(`[NOTIFICATION DEBUG] [${requestId}] Starting sendNotificationToUser for userId: ${userId}`);
     console.log(`[NOTIFICATION DEBUG] [${requestId}] Title: "${title}", Body: "${body}"`);
     console.log(`[NOTIFICATION DEBUG] [${requestId}] Data payload:`, JSON.stringify(data));

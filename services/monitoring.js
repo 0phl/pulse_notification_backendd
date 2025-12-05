@@ -600,12 +600,34 @@ const monitorChatMessages = () => {
       processedMessageIds.set(latestMessageKey, now);
 
       // Determine the recipient
-      const recipientId = latestMessage.senderId === chatData.buyerId
-        ? chatData.sellerId
-        : chatData.buyerId;
+      let recipientId;
+      if (chatData.buyerId && chatData.sellerId) {
+        recipientId = latestMessage.senderId === chatData.buyerId
+          ? chatData.sellerId
+          : chatData.buyerId;
+      } else {
+        // Fallback logic if buyerId/sellerId are missing from the chat object root
+        // For initial messages, the structure might be different or incomplete
+        console.log(`[CHAT DEBUG] Chat ${chatId} missing buyerId or sellerId. Analyzing message...`);
+        
+        // If we know the sellerId (usually in chat structure), and sender is NOT seller, then recipient is seller
+        if (chatData.sellerId && latestMessage.senderId !== chatData.sellerId) {
+           recipientId = chatData.sellerId;
+        } 
+        // If sender is seller, we need buyerId. If missing, we can't determine recipient easily without more context.
+        else if (chatData.sellerId && latestMessage.senderId === chatData.sellerId) {
+           // This case is harder if buyerId is missing. 
+           // However, usually the first message is FROM the buyer TO the seller.
+           console.log(`[CHAT DEBUG] Sender is seller, but buyerId is missing. Cannot determine recipient.`);
+        }
+      }
 
-      // Get sender's name
-      const senderSnapshot = await db.ref(`/users/${latestMessage.senderId}`).once('value');
+      if (!recipientId) {
+        console.log(`[CHAT ERROR] Could not determine recipient for chat ${chatId}`);
+        return;
+      }
+
+      console.log(`[CHAT DEBUG] Sending notification to ${recipientId} from ${latestMessage.senderId}`);
       const senderData = senderSnapshot.val();
       const senderName = senderData?.fullName || senderData?.username || 'Someone';
 
