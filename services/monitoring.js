@@ -536,6 +536,21 @@ const monitorMarketplaceItems = () => {
 const monitorChatMessages = () => {
   const db = getDatabase();
 
+  // Cache to track processed message IDs to prevent duplicates
+  // Key: messageId, Value: timestamp
+  const processedMessageIds = new Map();
+  
+  // Periodic cleanup of old message IDs from cache (every 5 minutes)
+  setInterval(() => {
+    const now = Date.now();
+    for (const [id, timestamp] of processedMessageIds.entries()) {
+      // Remove messages older than 2 minutes
+      if (now - timestamp > 2 * 60 * 1000) {
+        processedMessageIds.delete(id);
+      }
+    }
+  }, 5 * 60 * 1000);
+
   console.log('Starting monitoring for new chat messages...');
 
   // Listen for new messages in all chats
@@ -566,6 +581,12 @@ const monitorChatMessages = () => {
       if (!latestMessage || !latestMessage.senderId || !messageText) {
         return;
       }
+      
+      // Check if we've already processed this message ID
+      if (processedMessageIds.has(latestMessageKey)) {
+        console.log(`[CHAT DEBUG] Skipping duplicate notification for message ${latestMessageKey}`);
+        return;
+      }
 
       // Check if the message was just added (within the last 10 seconds)
       const now = Date.now();
@@ -574,6 +595,9 @@ const monitorChatMessages = () => {
       }
 
       console.log(`New chat message detected in chat ${chatId}`);
+
+      // Add to processed cache immediately
+      processedMessageIds.set(latestMessageKey, now);
 
       // Determine the recipient
       const recipientId = latestMessage.senderId === chatData.buyerId
@@ -2069,23 +2093,36 @@ const monitorMarketplaceItemStatusUpdates = () => {
           return; 
         }
 
-        // Process modified documents
-        const modifiedDocs = snapshot.docChanges()
-          .filter(change => {
-            const isModified = change.type === 'modified';
-            const isLocal = change.doc.metadata?.hasPendingWrites ?? false;
-            return isModified && !isLocal;
-          })
-          .map(change => ({
-            id: change.doc.id,
-            ...change.doc.data()
-          }));
+        // Process document changes
+        const changes = snapshot.docChanges();
+        
+        if (changes.length === 0) return;
 
-        if (modifiedDocs.length === 0) return;
-
-        for (const item of modifiedDocs) {
-          const itemId = item.id;
+        for (const change of changes) {
+          // We care about 'added' (to update cache for new items) and 'modified' (to detect status changes)
+          // We ignore 'removed' for now, or we could clean up the cache
+          if (change.type === 'removed') {
+            itemStatusCache.delete(change.doc.id);
+            continue;
+          }
+          
+          const item = change.doc.data();
+          const itemId = change.doc.id;
           const currentStatus = item.status;
+          
+          // Skip local writes
+          if (change.doc.metadata?.hasPendingWrites) continue;
+
+          if (change.type === 'added') {
+            // Just update the cache so we have a baseline for future modifications
+            if (currentStatus) {
+              itemStatusCache.set(itemId, currentStatus);
+              console.log(`[MARKET STATUS DEBUG] New item added to cache: ${itemId} with status ${currentStatus}`);
+            }
+            continue;
+          }
+
+          // Handle 'modified'
           const previousStatus = itemStatusCache.get(itemId);
 
           // Update cache
