@@ -581,6 +581,12 @@ const monitorChatMessages = () => {
         return;
       }
       
+      // Skip system messages
+      if (latestMessage.senderId === 'system') {
+        console.log(`[CHAT DEBUG] Skipping notification for system message in chat ${chatId}`);
+        return;
+      }
+      
       // Check if we've already processed this message ID
       if (processedMessageIds.has(latestMessageKey)) {
         // console.log(`[CHAT DEBUG] Skipping duplicate notification for message ${latestMessageKey}`);
