@@ -553,8 +553,7 @@ const monitorChatMessages = () => {
 
   console.log('Starting monitoring for new chat messages...');
 
-  // Listen for new messages in all chats
-  db.ref('/chats').on('child_changed', async (snapshot) => {
+  const processChatSnapshot = async (snapshot) => {
     try {
       const chatData = snapshot.val();
       const chatId = snapshot.key;
@@ -584,7 +583,7 @@ const monitorChatMessages = () => {
       
       // Check if we've already processed this message ID
       if (processedMessageIds.has(latestMessageKey)) {
-        console.log(`[CHAT DEBUG] Skipping duplicate notification for message ${latestMessageKey}`);
+        // console.log(`[CHAT DEBUG] Skipping duplicate notification for message ${latestMessageKey}`);
         return;
       }
 
@@ -594,7 +593,7 @@ const monitorChatMessages = () => {
         return;
       }
 
-      console.log(`New chat message detected in chat ${chatId}`);
+      console.log(`New chat message detected in chat ${chatId} (Event type: ${snapshot.key === chatId ? 'child_added/changed' : 'unknown'})`);
 
       // Add to processed cache immediately
       processedMessageIds.set(latestMessageKey, now);
@@ -628,6 +627,9 @@ const monitorChatMessages = () => {
       }
 
       console.log(`[CHAT DEBUG] Sending notification to ${recipientId} from ${latestMessage.senderId}`);
+
+      // Get sender's name
+      const senderSnapshot = await db.ref(`/users/${latestMessage.senderId}`).once('value');
       const senderData = senderSnapshot.val();
       const senderName = senderData?.fullName || senderData?.username || 'Someone';
 
@@ -648,7 +650,13 @@ const monitorChatMessages = () => {
     } catch (error) {
       console.error('Error processing new chat message:', error);
     }
-  });
+  };
+
+  // Listen for new messages in existing chats
+  db.ref('/chats').on('child_changed', processChatSnapshot);
+  
+  // Listen for new chats (first message)
+  db.ref('/chats').on('child_added', processChatSnapshot);
 };
 
 // Monitor for new reports
