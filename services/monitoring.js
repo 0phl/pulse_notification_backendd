@@ -444,11 +444,8 @@ const monitorMarketplaceItems = () => {
 
         // Get current time
         const now = Date.now();
-        // Only process active items created in the last 5 minutes
+        // Only process items created in the last 5 minutes
         const recentItems = addedDocs.filter(item => {
-          // Check if item is active
-          if (item.status !== 'active') return false;
-
           // Check if item has createdAt timestamp
           if (!item.createdAt) return false;
 
@@ -466,22 +463,68 @@ const monitorMarketplaceItems = () => {
         }
 
         for (const item of recentItems) {
-          console.log(`New marketplace item detected: ${item.id}`);
+          console.log(`New marketplace item detected: ${item.id} with status: ${item.status}`);
 
-          // Send notification to all users in the community except the seller
-          const { sendNotificationToCommunity } = require('./notifications');
-          await sendNotificationToCommunity(
-            item.communityId,
-            'New Item in Marketplace',
-            `${item.sellerName} is selling: "${item.title}" for ${item.price}`,
-            {
-              type: 'marketplace',
-              itemId: item.id,
-              communityId: item.communityId,
-              sellerId: item.sellerId,
-            },
-            item.sellerId // Exclude the seller
-          );
+          // Case 1: Item is Active or Approved -> Notify Community
+          if (item.status === 'active' || item.status === 'approved') {
+            console.log(`Sending community notification for active item ${item.id}`);
+            // Send notification to all users in the community except the seller
+            const { sendNotificationToCommunity } = require('./notifications');
+            await sendNotificationToCommunity(
+              item.communityId,
+              'New Item in Marketplace',
+              `${item.sellerName} is selling: "${item.title}" for ${item.price}`,
+              {
+                type: 'marketplace',
+                itemId: item.id,
+                communityId: item.communityId,
+                sellerId: item.sellerId,
+              },
+              item.sellerId // Exclude the seller
+            );
+          } 
+          // Case 2: Item is Pending -> Notify Admins
+          else if (item.status === 'pending') {
+            console.log(`Sending admin notification for pending item ${item.id}`);
+            
+            // Find admins in the community
+            const communityUsers = await firestore
+              .collection('users')
+              .where('communityId', '==', item.communityId)
+              .get();
+
+            const admins = communityUsers.docs.filter(doc => {
+              const userData = doc.data();
+              return userData.isAdmin === true || userData.role === 'admin';
+            });
+
+            if (admins.length === 0) {
+              console.log(`No admins found for community ${item.communityId} to notify about item ${item.id}`);
+              continue;
+            }
+
+            const { sendNotificationToUser } = require('./notifications');
+            
+            for (const adminDoc of admins) {
+              // Skip if the seller is an admin (don't notify them of their own pending item)
+              if (adminDoc.id === item.sellerId) continue;
+
+              console.log(`Sending pending item notification to admin ${adminDoc.id}`);
+              await sendNotificationToUser(
+                adminDoc.id,
+                'New Item Pending Approval',
+                `${item.sellerName} posted: "${item.title}". Review it now.`,
+                {
+                  type: 'marketplace',
+                  itemId: item.id,
+                  communityId: item.communityId,
+                  sellerId: item.sellerId,
+                  isForAdmin: 'true',
+                  action: 'review_item'
+                }
+              );
+            }
+          }
         }
       } catch (error) {
         console.error('Error processing new marketplace items:', error);
@@ -517,7 +560,10 @@ const monitorChatMessages = () => {
       const latestMessageKey = messageKeys[messageKeys.length - 1];
       const latestMessage = messages[latestMessageKey];
 
-      if (!latestMessage || !latestMessage.senderId || !latestMessage.text) {
+      // Check for either text or message property
+      const messageText = latestMessage.text || latestMessage.message;
+
+      if (!latestMessage || !latestMessage.senderId || !messageText) {
         return;
       }
 
@@ -539,26 +585,12 @@ const monitorChatMessages = () => {
       const senderData = senderSnapshot.val();
       const senderName = senderData?.fullName || senderData?.username || 'Someone';
 
-      // Get item data if available (for future use)
-      // Currently not using item title in the notification, but keeping the code for future enhancement
-      // if (chatData.itemId) {
-      //   try {
-      //     const itemDoc = await getFirestore().collection('market_items').doc(chatData.itemId).get();
-      //     if (itemDoc.exists) {
-      //       const itemTitle = itemDoc.data().title || 'an item';
-      //       // Could use itemTitle in the notification message in the future
-      //     }
-      //   } catch (error) {
-      //     console.error('Error getting item data:', error);
-      //   }
-      // }
-
       // Send notification to the recipient
       const { sendNotificationToUser } = require('./notifications');
       await sendNotificationToUser(
         recipientId,
         'New Message',
-        `${senderName}: "${latestMessage.text.substring(0, 50)}${latestMessage.text.length > 50 ? '...' : ''}"`,
+        `${senderName}: "${messageText.substring(0, 50)}${messageText.length > 50 ? '...' : ''}"`,
         {
           type: 'chat',
           chatId,
@@ -2010,6 +2042,104 @@ const monitorCommentReplyLikes = () => {
   });
 };
 
+// Monitor for marketplace item status updates (Approval/Rejection)
+const monitorMarketplaceItemStatusUpdates = () => {
+  const firestore = getFirestore();
+
+  // Track previous status of items to detect changes
+  const itemStatusCache = new Map();
+  let isInitialized = false;
+
+  console.log('Starting monitoring for marketplace item status updates...');
+
+  // Listen for updates to market items
+  firestore.collection('market_items')
+    .onSnapshot(async (snapshot) => {
+      try {
+        // On first snapshot, initialize the cache
+        if (!isInitialized) {
+          snapshot.docs.forEach(doc => {
+            const data = doc.data();
+            if (data.status) {
+              itemStatusCache.set(doc.id, data.status);
+            }
+          });
+          isInitialized = true;
+          console.log(`[MARKET STATUS DEBUG] Cache initialized with ${itemStatusCache.size} items`);
+          return; 
+        }
+
+        // Process modified documents
+        const modifiedDocs = snapshot.docChanges()
+          .filter(change => {
+            const isModified = change.type === 'modified';
+            const isLocal = change.doc.metadata?.hasPendingWrites ?? false;
+            return isModified && !isLocal;
+          })
+          .map(change => ({
+            id: change.doc.id,
+            ...change.doc.data()
+          }));
+
+        if (modifiedDocs.length === 0) return;
+
+        for (const item of modifiedDocs) {
+          const itemId = item.id;
+          const currentStatus = item.status;
+          const previousStatus = itemStatusCache.get(itemId);
+
+          // Update cache
+          itemStatusCache.set(itemId, currentStatus);
+
+          if (!previousStatus || currentStatus === previousStatus) continue;
+
+          console.log(`[MARKET STATUS DEBUG] Item ${itemId} status changed: ${previousStatus} -> ${currentStatus}`);
+
+          // Only care about status changes to 'approved'/'active' or 'rejected'
+          if (previousStatus === 'pending') {
+            const { sendNotificationToUser } = require('./notifications');
+            
+            if (currentStatus === 'approved' || currentStatus === 'active') {
+              console.log(`[MARKET STATUS DEBUG] Item approved. Notifying seller ${item.sellerId}`);
+              
+              await sendNotificationToUser(
+                item.sellerId,
+                'Item Approved',
+                `Your item "${item.title}" has been approved and is now live in the marketplace.`,
+                {
+                  type: 'marketplace',
+                  itemId: itemId,
+                  communityId: item.communityId,
+                  status: 'approved',
+                  timestamp: Date.now()
+                }
+              );
+            } else if (currentStatus === 'rejected') {
+              console.log(`[MARKET STATUS DEBUG] Item rejected. Notifying seller ${item.sellerId}`);
+              
+              const reason = item.rejectionReason ? ` Reason: ${item.rejectionReason}` : '';
+              
+              await sendNotificationToUser(
+                item.sellerId,
+                'Item Rejected',
+                `Your item "${item.title}" has been rejected.${reason}`,
+                {
+                  type: 'marketplace',
+                  itemId: itemId,
+                  communityId: item.communityId,
+                  status: 'rejected',
+                  timestamp: Date.now()
+                }
+              );
+            }
+          }
+        }
+      } catch (error) {
+        console.error('[MARKET STATUS ERROR] Error processing item status updates:', error);
+      }
+    });
+};
+
 // Start all monitoring functions
 const startAllMonitoring = () => {
   try {
@@ -2017,6 +2147,7 @@ const startAllMonitoring = () => {
     monitorCommunityNoticeComments();
     monitorCommunityNoticeLikes();
     monitorMarketplaceItems();
+    monitorMarketplaceItemStatusUpdates();
     monitorChatMessages();
     monitorNewReports();
     monitorReportStatusUpdates();
@@ -2038,6 +2169,7 @@ module.exports = {
   monitorCommunityNoticeComments,
   monitorCommunityNoticeLikes,
   monitorMarketplaceItems,
+  monitorMarketplaceItemStatusUpdates,
   monitorChatMessages,
   monitorNewReports,
   monitorReportStatusUpdates,
