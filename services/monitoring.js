@@ -2134,11 +2134,12 @@ const monitorMarketplaceItemStatusUpdates = () => {
 
           // Only care about status changes to 'approved'/'active' or 'rejected'
           if (previousStatus === 'pending') {
-            const { sendNotificationToUser } = require('./notifications');
+            const { sendNotificationToUser, sendNotificationToCommunity } = require('./notifications');
             
             if (currentStatus === 'approved' || currentStatus === 'active') {
               console.log(`[MARKET STATUS DEBUG] Item approved. Notifying seller ${item.sellerId}`);
               
+              // Notify Seller
               await sendNotificationToUser(
                 item.sellerId,
                 'Item Approved',
@@ -2151,6 +2152,25 @@ const monitorMarketplaceItemStatusUpdates = () => {
                   timestamp: Date.now()
                 }
               );
+
+              // Notify Community about the new item (now that it's approved)
+              console.log(`[MARKET STATUS DEBUG] Item approved. Notifying community ${item.communityId}`);
+              
+              // Note: We exclude the seller. The admin who approved it might still receive this notification
+              // if they are a member of the community, which is expected behavior for "New Item" alerts.
+              await sendNotificationToCommunity(
+                item.communityId,
+                'New Item in Marketplace',
+                `${item.sellerName} is selling: "${item.title}" for ${item.price}`,
+                {
+                  type: 'marketplace',
+                  itemId: itemId,
+                  communityId: item.communityId,
+                  sellerId: item.sellerId,
+                },
+                item.sellerId // Exclude the seller
+              );
+
             } else if (currentStatus === 'rejected') {
               console.log(`[MARKET STATUS DEBUG] Item rejected. Notifying seller ${item.sellerId}`);
               
